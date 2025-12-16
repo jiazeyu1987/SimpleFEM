@@ -99,10 +99,30 @@
       "max_tracking_age": 15
     }
   },
+  "startup_cleanup": {
+    "_comment": "程序启动时的清理功能配置：控制是否自动删除历史数据文件夹。",
+    "enabled": false,
+    "_comment_enabled": "是否启用启动时清理功能：true表示启动时自动删除指定文件夹内容。",
+    "cleanup_export": true,
+    "_comment_cleanup_export": "是否清理export文件夹：删除CSV统计数据文件。",
+    "cleanup_tmp": true,
+    "_comment_cleanup_tmp": "是否清理tmp文件夹：删除临时文件。",
+    "cleanup_logs": true,
+    "_comment_cleanup_logs": "是否清理logs文件夹：删除日志文件。",
+    "directories_to_clean": ["export", "tmp", "logs"],
+    "_comment_directories_to_clean": "自定义清理目录列表：可修改要清理的文件夹名称。"
+  },
   "deduplication": {
     "_comment": "统计导出去重参数（safe_peak_statistics.py 使用）：避免短时间内重复记录相似波峰。",
-    "consecutive_frame_window": 10,
-    "_comment_consecutive_frame_window": "连续同色去重窗口：同色波峰在该窗口内只保留更高的一个。",
-    "consecutive_deduplication_enabled": true
+    "consecutive_frame_window": 25,
+    "_comment_consecutive_frame_window": "连续去重窗口：20帧内相同峰值的波峰只保留优先级最高的一个。",
+    "consecutive_deduplication_enabled": true,
+    "cross_color_deduplication_enabled": true,
+    "_comment_cross_color_deduplication_enabled": "跨颜色去重：相同峰值的波峰无论颜色都只保留优先级更高的一个。",
+    "color_priority": {
+      "green": 2,
+      "red": 1,
+      "_comment": "颜色优先级：数值越大优先级越高。当相同时刻有相同峰值的波峰时，保留优先级高的。"
+    }
   }
 }

@@ -57,7 +57,29 @@ class SafePeakStatistics:
         # 新增：连续同色波峰去重配置
         self.consecutive_frame_window = 10  # 连续检查窗口（10帧）
         self.consecutive_deduplication_enabled = True  # 是否启用连续同色去重
+        self.cross_color_deduplication_enabled = True  # 是否启用跨颜色去重
+        self.color_priority = {'green': 2, 'red': 1}  # 默认颜色优先级
         self.consecutive_peak_groups: Dict[str, List[Dict[str, Any]]] = {}  # 跟踪连续同色波峰组
+
+        # 从配置文件读取参数
+        try:
+            config_path = os.path.join(BASE_DIR, "simple_fem_config.json")
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    dup_config = config.get("deduplication", {})
+
+                    self.consecutive_frame_window = dup_config.get("consecutive_frame_window", 10)
+                    self.consecutive_deduplication_enabled = dup_config.get("consecutive_deduplication_enabled", True)
+                    self.cross_color_deduplication_enabled = dup_config.get("cross_color_deduplication_enabled", True)
+
+                    color_priority_config = dup_config.get("color_priority", {})
+                    self.color_priority.update(color_priority_config)
+
+                    self._add_log(f"去重配置读取完成: 窗口={self.consecutive_frame_window}帧, 同色去重={self.consecutive_deduplication_enabled}, 跨颜色去重={self.cross_color_deduplication_enabled}")
+                    self._add_log(f"颜色优先级: {self.color_priority}")
+        except Exception as e:
+            self._add_log(f"读取配置文件失败，使用默认配置: {e}", level="WARNING")
 
         # 初始化CSV文件（程序开始时记录）
         self._initialize_csv_file()
@@ -307,38 +329,77 @@ class SafePeakStatistics:
             return False
 
     def _is_consecutive_duplicate(self, peak_data: Dict[str, Any], curve: List[float], start_frame: int, end_frame: int) -> bool:
-        """检查是否为连续同色重复波峰（10帧内的同色波峰，只保留最高的）"""
+        """检查是否为连续重复波峰（支持跨颜色去重和优先级处理）"""
         try:
-            if not self.consecutive_deduplication_enabled:
-                return False
-
+            # 调试信息：记录函数调用
             current_type = peak_data['peak_type']
             current_frame_index = peak_data['frame_index']
-            current_max_value = self._get_peak_max_value(curve, start_frame, end_frame)
+            current_max_value = peak_data['peak_max_value']
 
-            # 检查最近的波峰中是否有同色连续波峰
-            for recent_peak in self.recent_peaks[-20:]:  # 检查更多波峰以覆盖10帧窗口
-                if recent_peak['peak_type'] != current_type:
-                    continue  # 不同颜色，跳过
+            self._add_log(f"[调试] _is_consecutive_duplicate被调用: {current_type}波峰帧{current_frame_index}, 峰值{current_max_value:.3f}")
+            self._add_log(f"[调试] 配置: 去重启用={self.consecutive_deduplication_enabled}, 跨颜色={self.cross_color_deduplication_enabled}, 窗口={self.consecutive_frame_window}帧")
+            self._add_log(f"[调试] 颜色优先级: {self.color_priority}")
 
+            if not self.consecutive_deduplication_enabled:
+                self._add_log(f"[调试] 去重功能已禁用，返回False")
+                return False
+
+            # 检查最近的波峰中是否有跨颜色连续波峰
+            for recent_peak in self.recent_peaks[-30:]:  # 增加检查范围
                 recent_frame_index = recent_peak['frame_index']
                 recent_max_value = recent_peak.get('peak_max_value', 0)
+                recent_type = recent_peak['peak_type']
 
-                # 检查是否在10帧窗口内
-                if abs(current_frame_index - recent_frame_index) <= self.consecutive_frame_window:
-                    # 如果当前波峰更低，则是重复波峰
-                    if current_max_value <= recent_max_value:
-                        self._add_log(f"连续同色去重: {current_type}波峰帧{current_frame_index}(高度{current_max_value:.1f}) 低于 帧{recent_frame_index}(高度{recent_max_value:.1f})")
+                # 检查是否在时间窗口内
+                time_diff = abs(current_frame_index - recent_frame_index)
+                self._add_log(f"[调试] 检查历史波峰: {recent_type}帧{recent_frame_index}, 峰值{recent_max_value:.3f}, 时间差={time_diff}帧")
+
+                if time_diff <= self.consecutive_frame_window:
+                    self._add_log(f"[调试] 在时间窗口内，检查峰值相同性: |{current_max_value:.3f} - {recent_max_value:.3f}| = {abs(current_max_value - recent_max_value):.3f}")
+
+                    # 检查峰值是否完全相同（考虑浮点数精度）
+                    if abs(current_max_value - recent_max_value) < 0.01:
+                        # 相同峰值，根据颜色优先级决定保留哪个
+
+                        # 使用配置的颜色优先级
+                        current_priority = self.color_priority.get(current_type, 0)
+                        recent_priority = self.color_priority.get(recent_type, 0)
+
+                        if current_priority > recent_priority:
+                            # 当前波峰优先级更高，移除之前较低优先级的波峰
+                            self._remove_lower_consecutive_peak(recent_peak)
+                            self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 优先级({current_priority}) 高于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) 优先级({recent_priority})，移除较低优先级")
+                            return False
+                        elif current_priority < recent_priority:
+                            # 当前波峰优先级更低，跳过当前波峰
+                            self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 优先级({current_priority}) 低于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) 优先级({recent_priority})，跳过当前波峰")
+                            return True
+                        else:
+                            # 相同优先级（同颜色），按时间顺序处理
+                            if current_frame_index <= recent_frame_index:
+                                self._add_log(f"相同优先级去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 与 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) 时间较晚，跳过当前波峰")
+                                return True
+                            else:
+                                # 当前波峰时间更晚，移除之前的
+                                self._remove_lower_consecutive_peak(recent_peak)
+                                self._add_log(f"相同优先级去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 晚于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f})，移除较早波峰")
+                                return False
+                    elif current_max_value < recent_max_value:
+                        # 当前波峰更低，是重复波峰
+                        self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(高度{current_max_value:.1f}) 低于 {recent_type}波峰帧{recent_frame_index}(高度{recent_max_value:.1f})，跳过当前波峰")
                         return True
                     else:
                         # 如果当前波峰更高，移除之前的较低波峰
                         self._remove_lower_consecutive_peak(recent_peak)
-                        self._add_log(f"连续同色去重: {current_type}波峰帧{current_frame_index}(高度{current_max_value:.1f}) 高于 帧{recent_frame_index}(高度{recent_max_value:.1f})，移除较低的")
+                        self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(高度{current_max_value:.1f}) 高于 {recent_type}波峰帧{recent_frame_index}(高度{recent_max_value:.1f})，移除较低的")
                         return False
+
+            # 添加循环结束的调试信息
+            self._add_log(f"[调试] 检查完成，未找到重复波峰，返回False")
 
             return False
         except Exception as e:
-            self._add_log(f"连续同色去重检查失败: {e}", level="ERROR")
+            self._add_log(f"[调试] 连续同色去重检查失败: {e}", level="ERROR")
             return False
 
     def _is_invalid_peak_data(self, peak_data: Dict[str, Any]) -> bool:
