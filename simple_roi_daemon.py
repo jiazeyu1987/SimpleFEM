@@ -157,17 +157,45 @@ def initialize_video_capture(video_path: str):
     return video_cap
 
 
-def get_video_frame(video_cap, loop_enabled=False):
-    """从视频获取帧，返回PIL图像或None"""
-    ret, frame = video_cap.read()
-    if not ret:
-        if loop_enabled:
-            video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ret, frame = video_cap.read()
-            if not ret:
-                return None
-        else:
+def _get_video_fps(video_cap, default_fps: float = 30.0) -> float:
+    try:
+        fps = float(video_cap.get(cv2.CAP_PROP_FPS))
+    except Exception:
+        fps = 0.0
+    if not fps or fps <= 0:
+        return float(default_fps)
+    return float(fps)
+
+
+def get_video_frame(video_cap, loop_enabled: bool = False, frame_step: int = 1):
+    """
+    从视频获取帧，返回PIL图像或None。
+
+    frame_step>1 时，会在视频时间轴上“跳帧取样”：每次返回 1 帧，并将读取位置前进约 frame_step 帧。
+    这让 roi_capture.frame_rate 在 video 模式下真正对应“每秒采样多少帧”，而不是仅仅降低处理速度。
+    """
+    if frame_step is None:
+        frame_step = 1
+    try:
+        frame_step = int(frame_step)
+    except Exception:
+        frame_step = 1
+    frame_step = max(1, frame_step)
+
+    frame = None
+    for _ in range(frame_step):
+        ret, frame = video_cap.read()
+        if ret:
+            continue
+        if not loop_enabled:
             return None
+        video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret, frame = video_cap.read()
+        if not ret:
+            return None
+
+    if frame is None:
+        return None
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     return Image.fromarray(rgb_frame)
 
@@ -476,15 +504,37 @@ def run_daemon() -> None:
             roi_frame_rate = 1.0
         if roi_frame_rate <= 0:
             roi_frame_rate = 1.0
-        interval_seconds = 1.0 / roi_frame_rate
+        # Video mode: make roi_capture.frame_rate control sampling on the video timeline
+        # (skip frames based on source FPS), while keeping screen-capture mode unchanged.
+        video_fps = 0.0
+        video_frame_step = 1
+        first_video_frame = True
+        effective_frame_rate = roi_frame_rate
+        if processing_mode == "video" and video_cap is not None:
+            video_fps = _get_video_fps(video_cap)
+            if video_fps > 0:
+                effective_frame_rate = min(roi_frame_rate, video_fps)
+                if effective_frame_rate > 0:
+                    video_frame_step = max(1, int(round(video_fps / effective_frame_rate)))
+
+        interval_seconds = 1.0 / max(1e-6, effective_frame_rate)
+        if processing_mode == "video" and video_fps > 0:
+            print(
+                f"[video] source_fps={video_fps:.2f} target_fps={effective_frame_rate:.2f} frame_step={video_frame_step}"
+            )
+
+        # 调试信息：打印帧率配置
+        print(f"[帧率配置] 配置帧率: {roi_frame_rate} fps")
+        print(f"[帧率配置] 计算间隔: {interval_seconds:.3f} 秒/帧")
+        print(f"[帧率配置] 预期7秒视频处理: {7 * roi_frame_rate} 帧")
 
         # Calculate adaptive window frame count based on time window and frame rate
-        adaptive_window_frames = int(adaptive_window_seconds * roi_frame_rate)
+        adaptive_window_frames = int(adaptive_window_seconds * effective_frame_rate)
         # Ensure at least 1 frame and not exceed buffer size
         adaptive_window_frames = max(1, min(adaptive_window_frames, 100))
 
         # Calculate recovery delay in frames
-        recovery_delay_frames = int(recovery_delay_seconds * roi_frame_rate)
+        recovery_delay_frames = int(recovery_delay_seconds * effective_frame_rate)
         recovery_delay_frames = max(1, recovery_delay_frames)
 
         while True:
@@ -499,9 +549,18 @@ def run_daemon() -> None:
                 if processing_mode == "video":
                     video_config = config.get("video_processing", {})
                     loop_enabled = video_config.get("loop_enabled", False)
-                    screen = get_video_frame(video_cap, loop_enabled)
+                    # First frame uses step=1 to avoid skipping the very beginning.
+                    step = 1 if first_video_frame else video_frame_step
+                    first_video_frame = False
+                    screen = get_video_frame(video_cap, loop_enabled, frame_step=step)
                     if screen is None:
-                        print("视频播放结束")
+                        total_time = time.time() - (loop_start - (frame_index * interval_seconds))
+                        actual_fps = frame_index / total_time if total_time > 0 else 0
+                        print(f"视频播放结束")
+                        print(f"[统计] 总处理时间: {total_time:.2f} 秒")
+                        print(f"[统计] 总处理帧数: {frame_index}")
+                        print(f"[统计] 实际帧率: {actual_fps:.2f} fps")
+                        print(f"[统计] 配置帧率: {roi_frame_rate:.2f} fps")
                         break
                     screen_width, screen_height = screen.size
                 else:
@@ -802,6 +861,11 @@ def run_daemon() -> None:
             # Maintain ~1-second interval between iterations
             elapsed = time.time() - loop_start
             sleep_time = max(0.0, interval_seconds - elapsed)
+
+            # 调试信息：每10帧打印一次帧率控制信息
+            if frame_index % 10 == 0:
+                print(f"[帧率调试] 帧{frame_index}: 目标间隔={interval_seconds:.3f}s, 实际耗时={elapsed:.3f}s, 睡眠时间={sleep_time:.3f}s")
+
             time.sleep(sleep_time)
 
     finally:

@@ -11,12 +11,11 @@
   "video_processing": {
     "_comment": "processing_mode=video 时生效：从本地视频读取帧作为输入。",
     "video_path": "123.mp4",
-    "loop_enabled": false,
-    "processing_frame_rate": 10.0
+    "loop_enabled": false
   },
   "roi_capture": {
     "_comment": "ROI1/ROI2 截图参数：ROI1 是大区域，ROI2 是围绕绿色交点的局部区域。",
-    "frame_rate": 10,
+    "frame_rate": 20,
     "default_config": {
       "_comment": "ROI1 在屏幕/视频帧中的矩形坐标（x1,y1 左上；x2,y2 右下）。",
       "x1": 1280,
@@ -28,10 +27,10 @@
       "_comment": "ROI2 从 ROI1 中裁剪：以绿色交点为中心，按 extension_params 扩展得到 ROI2。",
       "extension_params": {
         "_comment": "ROI2 扩展像素：left/right/top/bottom 表示相对交点向四个方向扩展的像素数。",
-        "left": 20,
-        "right": 30,
-        "top": 60,
-        "bottom": 20
+        "left": 40,
+        "right": 40,
+        "top": 50,
+        "bottom": 30
       }
     }
   },
