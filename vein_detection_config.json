@@ -1,0 +1,37 @@
+{
+  "_comment": "Vein Detection Following Configuration - 使用与simple_fem_config.json相同的格式",
+  "processing_mode": "screen",
+  "roi_capture": {
+    "frame_rate": 10,
+    "roi2_config": {
+      "x1": 1480,
+      "y1": 480,
+      "x2": 1580,
+      "y2": 580,
+      "_comment": "初始ROI2坐标，将在跟踪过程中动态更新"
+    }
+  },
+  "vein_detection": {
+    "threshold_min": 0,
+    "threshold_max": 10,
+    "connectivity": 4,
+    "min_component_size": 50,
+    "tracking": {
+      "max_tracking_failures": 5,
+      "fallback_to_previous": true,
+      "reset_on_failure": false
+    }
+  },
+  "data_processing": {
+    "save_roi2": true,
+    "save_masks": true,
+    "only_save_with_detection": false,
+    "create_roi2_subdir": true
+  },
+  "logging": {
+    "level": "INFO",
+    "file_name": "vein_detector.log",
+    "rotate_daily": true,
+    "backup_count": 7
+  }
+}

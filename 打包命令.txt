@@ -1,0 +1,1 @@
+pyinstaller --onefile --console --name SimpleFEM_ROI_Daemon --add-data "simple_fem_config.json;."  simple_roi_daemon.py
