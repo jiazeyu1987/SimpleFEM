@@ -242,13 +242,9 @@ def run_daemon() -> None:
         threshold = float(peak_conf.get("threshold", 105.0))
         margin_frames = int(peak_conf.get("margin_frames", 5))
         diff_threshold = float(peak_conf.get("difference_threshold", 0.5))
-        # 新增：阈值前后“静默”帧数要求（升阈值前 X 帧和降阈值后 X 帧都不能超过阈值）
+        # 新增：阈值前后"静默"帧数要求（升阈值前 X 帧和降阈值后 X 帧都不能超过阈值）
         silence_frames = int(peak_conf.get("silence_frames", 0))
         pre_post_avg_frames = int(peak_conf.get("pre_post_avg_frames", 5))
-        # 新增：自适应阈值（基于 ROI2 灰度历史均值）
-        adaptive_threshold_enabled = bool(peak_conf.get("adaptive_threshold_enabled", False))
-        threshold_over_mean_ratio = float(peak_conf.get("threshold_over_mean_ratio", 0.1))
-        history_mean_min_samples = int(peak_conf.get("history_mean_min_samples", 30))
         min_region_length = int(peak_conf.get("min_region_length", 1))
 
         logger = setup_peak_logger()
@@ -360,34 +356,22 @@ def run_daemon() -> None:
                         bg_count = 1
                         bg_mean = roi2_gray
                     else:
-                        if adaptive_threshold_enabled and bg_mean > 0:
-                            gate_threshold = bg_mean * (1.0 + threshold_over_mean_ratio)
-                        else:
-                            gate_threshold = threshold
-
-                        if roi2_gray < gate_threshold:
+                        # Only update background mean when current gray value is below threshold
+                        if roi2_gray < threshold:
                             bg_count += 1
                             bg_mean += (roi2_gray - bg_mean) / bg_count
 
                 # 5. Run peak detection on current gray buffer
                 green_peaks: List[Tuple[int, int]] = []
                 red_peaks: List[Tuple[int, int]] = []
-                threshold_used = threshold
 
                 if gray_buffer:
                     curve = list(gray_buffer)
-                    # Compute adaptive threshold if enabled and enough history is available.
-                    # threshold_used = historical_mean * (1 + ratio)
-                    if (
-                        adaptive_threshold_enabled
-                        and bg_count >= history_mean_min_samples
-                        and bg_mean > 0
-                    ):
-                        threshold_used = bg_mean * (1.0 + threshold_over_mean_ratio)
+                    # Use fixed threshold for peak detection
                     try:
                         green_peaks_raw, red_peaks_raw = detect_peaks(
                             curve,
-                            threshold=threshold_used,
+                            threshold=threshold,
                             marginFrames=margin_frames,
                             differenceThreshold=diff_threshold,
                             silenceFrames=silence_frames,
@@ -441,7 +425,7 @@ def run_daemon() -> None:
                         gray_value=roi2_gray,
                         difference_threshold=diff_threshold,
                         pre_post_avg_frames=pre_post_avg_frames,
-                        threshold_used=threshold_used,
+                        threshold_used=threshold,
                         bg_mean=(bg_mean if bg_count > 0 else None),
                     )
 
@@ -492,6 +476,15 @@ def run_daemon() -> None:
                                 label="bg_mean",
                             )
 
+                        # Draw current threshold used for peak detection
+                        ax.axhline(
+                            threshold,
+                            color="orange",
+                            linestyle="-",
+                            linewidth=1.5,
+                            label=f"threshold ({threshold:.1f})",
+                        )
+
                         # Highlight green and red regions (slightly expanded for readability)
                         for start, end in green_peaks:
                             s = max(0, start - 1)
@@ -510,9 +503,9 @@ def run_daemon() -> None:
                         ax.set_xlabel("Frame index in buffer")
                         ax.set_ylabel("Gray value")
                         ax.set_title("ROI2 gray waveform with peaks")
+                        ax.set_ylim(50, 150)
                         ax.grid(True, linestyle="--", alpha=0.3)
-                        if bg_count > 0:
-                            ax.legend(loc="best", fontsize=8)
+                        ax.legend(loc="best", fontsize=8)
                         fig.tight_layout()
                         fig.savefig(wave_path)
                         plt.close(fig)
