@@ -27,6 +27,94 @@ import cv2
 import matplotlib.pyplot as plt
 
 
+def manage_threshold_protection(
+    current_gray: float,
+    current_threshold: float,
+    has_peaks: bool,
+    frame_time: float,
+    # State variables (passed by reference)
+    protection_active: bool,
+    protection_end_time: float,
+    consecutive_below: int,
+    last_waveform_time: float,
+    # Configuration
+    enabled: bool = True,
+    recovery_delay_frames: int = 10,
+    stability_frames: int = 5,
+    waveform_trigger: bool = True,
+    threshold_minimum: float = 80.0,
+) -> Tuple[bool, float, int, int, float]:
+    """
+    管理阈值保护状态
+
+    Args:
+        current_gray: 当前灰度值
+        current_threshold: 当前阈值
+        has_peaks: 当前帧是否检测到波峰
+        frame_time: 当前帧的时间戳
+        protection_active: 保护状态是否激活
+        protection_end_time: 保护结束时间
+        consecutive_below: 连续低于阈值的帧数
+        last_waveform_time: 上次波形时间
+        enabled: 是否启用保护机制
+        recovery_delay_frames: 恢复延迟帧数
+        stability_frames: 稳定性帧数要求
+        waveform_trigger: 是否启用波形触发
+        threshold_minimum: 阈值下限，确保阈值不会低于此值
+
+    Returns:
+        Tuple[bool, float, int, int, float]:
+            (should_protect, new_end_time, new_consecutive_below, frames_since_end, new_waveform_time)
+    """
+    current_time = frame_time
+    frames_since_end = max(0, int((current_time - protection_end_time) / (1.0/10)))  # 假设10fps
+
+    if not enabled:
+        return False, protection_end_time, consecutive_below, frames_since_end, last_waveform_time
+
+    # 检查是否需要触发保护
+    should_protect = protection_active
+
+    # 1. 波形触发：当前灰度超过阈值时立即触发保护
+    if waveform_trigger and current_gray >= current_threshold:
+        should_protect = True
+        last_waveform_time = current_time
+        if not protection_active:
+            print(f"[阈值保护] 波形触发保护: 灰度={current_gray:.1f} >= 阈值={current_threshold:.1f}")
+
+    # 2. 波峰结果触发：检测到波峰时激活保护
+    elif has_peaks and not protection_active:
+        should_protect = True
+        last_waveform_time = current_time
+        print(f"[阈值保护] 波峰触发保护: 检测到波峰")
+
+    # 3. 检查是否可以解除保护
+    if should_protect:
+        # 计算应该的结束时间
+        planned_end_time = last_waveform_time + (recovery_delay_frames * 0.1)  # 0.1秒每帧
+
+        # 检查稳定性条件：连续多帧低于阈值
+        if current_gray < current_threshold:
+            consecutive_below += 1
+        else:
+            consecutive_below = 0
+
+        # 智能退出：满足延迟时间和稳定性条件
+        time_condition = current_time >= planned_end_time
+        stability_condition = consecutive_below >= stability_frames
+
+        if time_condition and stability_condition:
+            should_protect = False
+            consecutive_below = 0
+            frames_since_end = 0
+            print(f"[阈值保护] 解除保护: 满足时间延迟({recovery_delay_frames}帧)和稳定性({stability_frames}帧)条件")
+        else:
+            # 更新结束时间
+            protection_end_time = planned_end_time
+
+    return should_protect, protection_end_time, consecutive_below, frames_since_end, last_waveform_time
+
+
 def _get_base_dir() -> str:
     """
     Resolve base directory both for source (.py) and frozen (.exe) modes.
@@ -240,11 +328,24 @@ def run_daemon() -> None:
 
         peak_conf = config.get("peak_detection", {})
         threshold = float(peak_conf.get("threshold", 105.0))
+        threshold_minimum = float(peak_conf.get("threshold_minimum", 80.0))
         margin_frames = int(peak_conf.get("margin_frames", 5))
         diff_threshold = float(peak_conf.get("difference_threshold", 0.5))
         # 新增：阈值前后"静默"帧数要求（升阈值前 X 帧和降阈值后 X 帧都不能超过阈值）
         silence_frames = int(peak_conf.get("silence_frames", 0))
         pre_post_avg_frames = int(peak_conf.get("pre_post_avg_frames", 5))
+        # 自适应阈值参数
+        adaptive_threshold_enabled = bool(peak_conf.get("adaptive_threshold_enabled", False))
+        threshold_over_mean_ratio = float(peak_conf.get("threshold_over_mean_ratio", 0.15))
+        adaptive_window_seconds = float(peak_conf.get("adaptive_window_seconds", 3.0))
+
+        # 阈值保护参数
+        protection_conf = peak_conf.get("threshold_protection", {})
+        protection_enabled = bool(protection_conf.get("enabled", False))
+        recovery_delay_seconds = float(protection_conf.get("recovery_delay_seconds", 1.0))
+        stability_frames = int(protection_conf.get("stability_frames", 5))
+        waveform_trigger_enabled = bool(protection_conf.get("waveform_trigger_enabled", True))
+
         min_region_length = int(peak_conf.get("min_region_length", 1))
 
         logger = setup_peak_logger()
@@ -256,6 +357,12 @@ def run_daemon() -> None:
         bg_count: int = 0
         bg_mean: float = 0.0
         last_intersection_roi: Optional[Tuple[int, int]] = None
+
+        # Threshold protection state management
+        threshold_protection_active: bool = False
+        protection_end_time: float = 0.0
+        consecutive_below_threshold: int = 0
+        last_waveform_time: float = 0.0
 
         # Prepare per-session image save directories if enabled
         session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -284,6 +391,15 @@ def run_daemon() -> None:
         if roi_frame_rate <= 0:
             roi_frame_rate = 1.0
         interval_seconds = 1.0 / roi_frame_rate
+
+        # Calculate adaptive window frame count based on time window and frame rate
+        adaptive_window_frames = int(adaptive_window_seconds * roi_frame_rate)
+        # Ensure at least 1 frame and not exceed buffer size
+        adaptive_window_frames = max(1, min(adaptive_window_frames, 100))
+
+        # Calculate recovery delay in frames
+        recovery_delay_frames = int(recovery_delay_seconds * roi_frame_rate)
+        recovery_delay_frames = max(1, recovery_delay_frames)
 
         while True:
             loop_start = time.time()
@@ -351,27 +467,66 @@ def run_daemon() -> None:
                     roi2_gray = compute_average_gray(roi2_image)
                     gray_buffer.append(roi2_gray)
 
-                    # Update background mean with gating (exclude peak/high frames).
-                    if bg_count == 0:
-                        bg_count = 1
-                        bg_mean = roi2_gray
-                    else:
-                        # Only update background mean when current gray value is below threshold
-                        if roi2_gray < threshold:
-                            bg_count += 1
-                            bg_mean += (roi2_gray - bg_mean) / bg_count
-
                 # 5. Run peak detection on current gray buffer
                 green_peaks: List[Tuple[int, int]] = []
                 red_peaks: List[Tuple[int, int]] = []
+                threshold_used = max(threshold, threshold_minimum)
 
                 if gray_buffer:
                     curve = list(gray_buffer)
-                    # Use fixed threshold for peak detection
+                    # Calculate adaptive threshold if enabled and enough history is available
+                    if (
+                        adaptive_threshold_enabled
+                        and len(gray_buffer) >= adaptive_window_frames
+                    ):
+                        # Calculate recent mean (last adaptive_window_frames from gray_buffer)
+                        recent_frames_count = min(len(gray_buffer), adaptive_window_frames)
+                        recent_frames = list(gray_buffer)[-recent_frames_count:]
+                        calculated_bg_mean = sum(recent_frames) / len(recent_frames)
+
+                        # First, check if we're already in protection mode and need to extend it
+                        current_time = time.time()
+                        if threshold_protection_active:
+                            # Check protection status with current gray value
+                            (threshold_protection_active, protection_end_time,
+                             consecutive_below_threshold, frames_since_protection_end,
+                             last_waveform_time) = manage_threshold_protection(
+                                current_gray=roi2_gray if roi2_gray is not None else 0,
+                                current_threshold=threshold_used,
+                                has_peaks=False,  # Will check again after detection
+                                frame_time=current_time,
+                                protection_active=threshold_protection_active,
+                                protection_end_time=protection_end_time,
+                                consecutive_below=consecutive_below_threshold,
+                                last_waveform_time=last_waveform_time,
+                                enabled=protection_enabled,
+                                recovery_delay_frames=recovery_delay_frames,
+                                stability_frames=stability_frames,
+                                waveform_trigger=waveform_trigger_enabled,
+                                threshold_minimum=threshold_minimum,
+                            )
+
+                        # Only update background mean when protection is not active
+                        if not threshold_protection_active:
+                            bg_mean = calculated_bg_mean
+                            bg_count = recent_frames_count
+                            if adaptive_threshold_enabled and bg_mean > 0:
+                                threshold_used = bg_mean * (1.0 + threshold_over_mean_ratio)
+                                # Apply minimum threshold constraint
+                                threshold_used = max(threshold_used, threshold_minimum)
+                        else:
+                            # Use last known background mean during protection
+                            if bg_mean > 0:
+                                threshold_used = bg_mean * (1.0 + threshold_over_mean_ratio)
+                                # Apply minimum threshold constraint even during protection
+                                threshold_used = max(threshold_used, threshold_minimum)
+                            print(f"[阈值保护] 保护期间使用冻结阈值: {threshold_used:.1f} (下限: {threshold_minimum:.1f})")
+
+                    # Now run actual peak detection with the determined threshold
                     try:
                         green_peaks_raw, red_peaks_raw = detect_peaks(
                             curve,
-                            threshold=threshold,
+                            threshold=threshold_used,
                             marginFrames=margin_frames,
                             differenceThreshold=diff_threshold,
                             silenceFrames=silence_frames,
@@ -383,15 +538,39 @@ def run_daemon() -> None:
                     # Apply min_region_length filter
                     green_peaks = [
                         (start, end)
-                        for (start, end) in green_peaks_raw
+                        for start, end in green_peaks_raw
                         if (end - start + 1) >= min_region_length
                     ]
                     red_peaks = [
                         (start, end)
-                        for (start, end) in red_peaks_raw
+                        for start, end in red_peaks_raw
                         if (end - start + 1) >= min_region_length
                     ]
 
+                    # Re-check threshold protection with actual peak detection results
+                    if protection_enabled and roi2_gray is not None:
+                        has_peaks = len(green_peaks) > 0 or len(red_peaks) > 0
+                        current_time = time.time()
+
+                        (threshold_protection_active, protection_end_time,
+                         consecutive_below_threshold, frames_since_protection_end,
+                         last_waveform_time) = manage_threshold_protection(
+                            current_gray=roi2_gray,
+                            current_threshold=threshold_used,
+                            has_peaks=has_peaks,
+                            frame_time=current_time,
+                            protection_active=threshold_protection_active,
+                            protection_end_time=protection_end_time,
+                            consecutive_below=consecutive_below_threshold,
+                            last_waveform_time=last_waveform_time,
+                            enabled=protection_enabled,
+                            recovery_delay_frames=recovery_delay_frames,
+                            stability_frames=stability_frames,
+                            waveform_trigger=waveform_trigger_enabled,
+                            threshold_minimum=threshold_minimum,
+                        )
+
+      
                 green_count = len(green_peaks)
                 red_count = len(red_peaks)
                 last_green = green_peaks[-1] if green_peaks else None
@@ -425,7 +604,7 @@ def run_daemon() -> None:
                         gray_value=roi2_gray,
                         difference_threshold=diff_threshold,
                         pre_post_avg_frames=pre_post_avg_frames,
-                        threshold_used=threshold,
+                        threshold_used=threshold_used,
                         bg_mean=(bg_mean if bg_count > 0 else None),
                     )
 
@@ -477,12 +656,14 @@ def run_daemon() -> None:
                             )
 
                         # Draw current threshold used for peak detection
+                        threshold_color = "red" if threshold_protection_active else "orange"
+                        threshold_style = "--" if threshold_protection_active else "-"
                         ax.axhline(
-                            threshold,
-                            color="orange",
-                            linestyle="-",
+                            threshold_used,
+                            color=threshold_color,
+                            linestyle=threshold_style,
                             linewidth=1.5,
-                            label=f"threshold ({threshold:.1f})",
+                            label=f"threshold ({threshold_used:.1f}{'[PROTECTED]' if threshold_protection_active else ''})",
                         )
 
                         # Highlight green and red regions (slightly expanded for readability)
