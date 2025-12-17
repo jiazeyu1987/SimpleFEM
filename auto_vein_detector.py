@@ -978,7 +978,7 @@ class VeinDetectionEngine:
 
             self.logger.debug(f"Connected components found: {num_labels-1} (excluding background)")
 
-            # Filter by minimum component size
+            # Filter by minimum component size first
             if min_component_size > 0:
                 valid_labels = []
                 for i in range(1, num_labels):  # Skip label 0 (background)
@@ -987,22 +987,48 @@ class VeinDetectionEngine:
                         valid_labels.append(i)
                 self.logger.debug(f"Components after size filter: {len(valid_labels)}")
 
-                # Create filtered mask
-                filtered_result = np.zeros_like(filtered_mask)
+                # Create filtered mask with only valid components
+                filtered_mask = np.zeros_like(filtered_mask)
                 for label in valid_labels:
-                    filtered_result[labels == label] = 255
+                    filtered_mask[labels == label] = 255
 
-                return filtered_result, num_labels
+                # Re-run connected components on size-filtered mask to get updated labels
+                num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+                    filtered_mask,
+                    connectivity=connectivity,
+                    ltype=cv2.CV_32S
+                )
+
+            # Now extract ONLY the center component (not all components)
+            # Get ROI center coordinates
+            if hasattr(self, 'roi_state') and self.roi_state:
+                # Calculate center of the current ROI2 region
+                current_x1, current_y1, current_x2, current_y2 = self.roi_state.current_coords
+                center_x = (current_x2 - current_x1) // 2  # Center within ROI2
+                center_y = (current_y2 - current_y1) // 2
+                roi_center = (center_x, center_y)
             else:
-                # No size filtering, return all components
-                return (filtered_mask > 0).astype(np.uint8) * 255, num_labels
+                # Fallback to image center
+                height, width = labels.shape
+                roi_center = (width // 2, height // 2)
+
+            # Extract only the component containing or closest to ROI center
+            center_component_mask = self.extract_center_component(labels, roi_center)
+
+            if center_component_mask is not None:
+                final_pixels = np.sum(center_component_mask > 0)
+                self.logger.debug(f"Final center component extracted: {final_pixels} pixels")
+                return center_component_mask, num_labels
+            else:
+                self.logger.debug("No center component found")
+                return None, 0
 
         except Exception as e:
             self.log_error("Connected component analysis failed", e)
             return None, 0
 
     def extract_center_component(self, labels: np.ndarray, center: Tuple[int, int]) -> Optional[np.ndarray]:
-        """Extract the connected component containing the specified center point."""
+        """Extract the connected component containing the specified center point based on real connected domains."""
         try:
             if center is None:
                 self.logger.error("No center point provided for component extraction")
@@ -1020,7 +1046,7 @@ class VeinDetectionEngine:
             center_label = labels[cy, cx]
 
             if center_label == 0:
-                # No component at exact center point - find the largest component
+                # No component at exact center point - find the component closest to center
                 self.logger.debug(f"No connected component at exact center point ({cx}, {cy})")
 
                 # Find all unique labels (excluding background)
@@ -1031,26 +1057,40 @@ class VeinDetectionEngine:
                     self.logger.debug("No connected components found")
                     return None
 
-                # Find the largest component by area
-                largest_label = 0
-                largest_area = 0
-                for label in unique_labels:
-                    area = np.sum(labels == label)
-                    if area > largest_area:
-                        largest_area = area
-                        largest_label = label
+                # Find the component closest to the center point
+                closest_label = 0
+                min_distance = float('inf')
 
-                if largest_label > 0:
-                    self.logger.debug(f"Using largest component: label {largest_label}, area {largest_area}")
-                    center_label = largest_label
+                for label in unique_labels:
+                    # Get coordinates of this component
+                    component_coords = np.where(labels == label)
+                    if len(component_coords[0]) > 0:
+                        # Calculate centroid of this component
+                        comp_cy = int(np.mean(component_coords[0]))
+                        comp_cx = int(np.mean(component_coords[1]))
+
+                        # Calculate distance to ROI center
+                        distance = ((comp_cx - cx) ** 2 + (comp_cy - cy) ** 2) ** 0.5
+
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_label = label
+                            closest_centroid = (comp_cx, comp_cx)
+
+                if closest_label > 0:
+                    area = np.sum(labels == closest_label)
+                    self.logger.debug(f"Using closest component: label {closest_label}, centroid {closest_centroid}, distance {min_distance:.1f}, area {area}")
+                    center_label = closest_label
                 else:
                     self.logger.debug("No valid connected components found")
                     return None
 
-            # Create binary mask for the center component
+            # Create binary mask for the center component - USE REAL CONNECTED DOMAIN
             center_mask = (labels == center_label).astype(np.uint8) * 255
 
-            self.logger.debug(f"Center component extracted: label {center_label}, pixels: {np.sum(center_mask > 0)}")
+            final_pixels = np.sum(center_mask > 0)
+            self.logger.debug(f"Real connected component extracted: label {center_label}, pixels: {final_pixels}")
+
             return center_mask
 
         except Exception as e:
@@ -1666,15 +1706,8 @@ class VeinDetectionEngine:
             else:
                 roi2_array = roi2_image
 
-            thresholded_image = self.apply_threshold_filter(roi2_array)
-            if thresholded_image is None:
-                frame_result.error_message = "Failed to apply threshold filter"
-                frame_result.processing_time = time.time() - start_time
-                self.processing_times.append(frame_result.processing_time)
-                return frame_result
-
-            # Step 3: Perform connected component analysis
-            components, num_labels = self.analyze_connected_components(thresholded_image)
+            # Step 3: Perform connected component analysis (thresholding applied internally)
+            components, num_labels = self.analyze_connected_components(roi2_array)
             if components is None or num_labels <= 1:  # Only background (label 0)
                 frame_result.detection_successful = False
                 frame_result.error_message = "No connected components detected"

@@ -10,18 +10,18 @@
   "roi_capture": {
     "frame_rate": 10,
     "roi2_config": {
-      "x1": 1600,
-      "y1": 580,
-      "x2": 1700,
+      "x1": 1570,
+      "y1": 550,
+      "x2": 1720,
       "y2": 680,
       "_comment": "初始ROI2坐标，将在跟踪过程中动态更新"
     }
   },
   "vein_detection": {
     "threshold_min": 0,
-    "threshold_max": 210,
+    "threshold_max": 10,
     "connectivity": 4,
-    "min_component_size": 5,
+    "min_component_size": 50,
     "tracking": {
       "max_tracking_failures": 5,
       "fallback_to_previous": true,
