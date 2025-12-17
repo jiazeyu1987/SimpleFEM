@@ -40,6 +40,7 @@ class ROIState:
     fallback_coords: Tuple[int, int, int, int]
     tracking_active: bool
     consecutive_failures: int
+    last_mask_size: int = 0  # 记录上一个成功的mask大小（像素数）
 
     def update_with_centroid(self, centroid: Tuple[int, int], roi_width: int, roi_height: int) -> None:
         """Update ROI coordinates to center on centroid while maintaining dimensions."""
@@ -125,6 +126,8 @@ class VeinDetectionConfig:
     max_tracking_failures: int = 5
     fallback_to_previous: bool = True
     reset_on_failure: bool = False
+    mask_size_lower_limit: float = 0.8  # mask大小下限阈值（80%）
+    mask_size_upper_limit: float = 1.2  # mask大小上限阈值（120%）
 
     # File Processing
     save_roi2: bool = True
@@ -182,6 +185,8 @@ class VeinDetectionConfig:
             max_tracking_failures=vein_config.get("tracking", {}).get("max_tracking_failures", 5),
             fallback_to_previous=vein_config.get("tracking", {}).get("fallback_to_previous", True),
             reset_on_failure=vein_config.get("tracking", {}).get("reset_on_failure", False),
+            mask_size_lower_limit=vein_config.get("tracking", {}).get("mask_size_lower_limit", 0.8),
+            mask_size_upper_limit=vein_config.get("tracking", {}).get("mask_size_upper_limit", 1.2),
             save_roi2=data_config.get("save_roi2", True),
             save_masks=data_config.get("save_masks", True),
             only_save_with_detection=data_config.get("only_save_with_detection", False)
@@ -557,7 +562,8 @@ class VeinDetectionEngine:
             previous_coords=initial_coords,
             fallback_coords=initial_coords,
             tracking_active=False,
-            consecutive_failures=0
+            consecutive_failures=0,
+            last_mask_size=0
         )
 
         self.logger.info(f"ROI state initialized: {initial_coords}")
@@ -612,8 +618,12 @@ class VeinDetectionEngine:
                 current_fps = 1.0 / avg_time if avg_time > 0 else 0
                 self.logger.info(f"Average processing time: {avg_time*1000:.1f}ms (~{current_fps:.1f} FPS)")
 
-    def capture_roi2_region(self, coords: Optional[Tuple[int, int, int, int]] = None) -> Optional[Image.Image]:
-        """支持屏幕和视频两种模式的 ROI2 捕获"""
+    def capture_roi2_region(self, coords: Optional[Tuple[int, int, int, int]] = None) -> Tuple[Optional[Image.Image], Optional[Image.Image]]:
+        """支持屏幕和视频两种模式的 ROI2 捕获，同时返回原图和ROI2图像
+
+        Returns:
+            Tuple[roi2_image, original_image]: ROI2图像和对应的原图区域
+        """
         try:
             # Use provided coordinates or current ROI state coordinates
             if coords is None and self.roi_state:
@@ -623,35 +633,39 @@ class VeinDetectionEngine:
 
             if not coords:
                 self.logger.error("No ROI coordinates available for capture")
-                return None
+                return None, None
 
             x1, y1, x2, y2 = coords
 
             # Validate coordinates
             if x2 <= x1 or y2 <= y1:
                 self.logger.error(f"Invalid ROI coordinates: ({x1}, {y1}, {x2}, {y2})")
-                return None
+                return None, None
 
             if self.config_obj.processing_mode == "video":
                 # 视频模式逻辑
                 frame = self.get_current_video_frame()
                 if frame is None:
-                    return None
+                    return None, None
 
                 # 从视频帧中裁剪 ROI
                 roi_image = frame.crop((x1, y1, x2, y2))
+                # 原图也是相同区域的裁剪（为了保持与ROI2一致）
+                original_image = frame.crop((x1, y1, x2, y2))
                 self.logger.debug(f"Video ROI2 captured: {coords} -> size: {roi_image.size}")
             else:
                 # 屏幕模式逻辑 (保持原有)
                 screen = ImageGrab.grab()
                 roi_image = screen.crop((x1, y1, x2, y2))
+                # 原图就是整个屏幕截图中对应ROI的区域
+                original_image = screen.crop((x1, y1, x2, y2))
                 self.logger.debug(f"Screen ROI2 captured: {coords} -> size: {roi_image.size}")
 
-            return roi_image
+            return roi_image, original_image
 
         except Exception as e:
             self.log_error("ROI2 capture failed", e)
-            return None
+            return None, None
 
     def get_current_video_frame(self) -> Optional[Image.Image]:
         """获取当前视频帧"""
@@ -1151,6 +1165,61 @@ class VeinDetectionEngine:
             self.log_error("Mask centroid calculation failed", e)
             return None
 
+    def check_mask_size_change(self, current_mask_size: int) -> Tuple[bool, str]:
+        """Check if mask size change should be recorded.
+
+        Args:
+            current_mask_size: Size of current mask in pixels
+
+        Returns:
+            Tuple[should_accept, reason]:
+            - should_accept: True if detection should be accepted
+            - reason: Description of the decision
+        """
+        try:
+            if not self.roi_state or not self.config_obj:
+                return True, "No previous data to compare"
+
+            last_size = self.roi_state.last_mask_size
+            lower_limit = self.config_obj.mask_size_lower_limit  # 80% - 小于此变化时不予记录
+            upper_limit = self.config_obj.mask_size_upper_limit  # 120% - 大于此变化时不予记录
+
+            # If this is the first mask, accept it
+            if last_size == 0:
+                self.logger.debug(f"First mask detected, size: {current_mask_size}")
+                return True, "First mask"
+
+            # Calculate size ratio
+            if last_size > 0:
+                size_ratio = current_mask_size / last_size  # 直接计算比例
+
+                # 1. 如果小于80%，不予记录
+                if size_ratio < lower_limit:
+                    self.logger.debug(f"Mask size too small to record: {size_ratio:.1%} "
+                                     f"(lower limit: {lower_limit:.1%}) "
+                                     f"Current: {current_mask_size}, Previous: {last_size}")
+                    return False, f"Size too small: {size_ratio:.1%} < {lower_limit:.1%}"
+
+                # 2. 如果大于120%，不予记录
+                elif size_ratio > upper_limit:
+                    self.logger.debug(f"Mask size too large to record: {size_ratio:.1%} "
+                                     f"(upper limit: {upper_limit:.1%}) "
+                                     f"Current: {current_mask_size}, Previous: {last_size}")
+                    return False, f"Size too large: {size_ratio:.1%} > {upper_limit:.1%}"
+
+                # 3. 在80%-120%之间，可以记录
+                else:
+                    self.logger.debug(f"Mask size acceptable: {size_ratio:.1%} "
+                                     f"(range: {lower_limit:.1%} - {upper_limit:.1%}) "
+                                     f"Current: {current_mask_size}, Previous: {last_size}")
+                    return True, f"Acceptable: {size_ratio:.1%}"
+            else:
+                return True, "Previous size invalid"
+
+        except Exception as e:
+            self.logger.error(f"Error checking mask size change: {e}")
+            return True, "Error - default to accept"
+
     def update_roi_with_centroid(self, centroid: Tuple[int, int]) -> bool:
         """Update ROI coordinates to center on mask centroid while maintaining dimensions."""
         try:
@@ -1291,8 +1360,15 @@ class VeinDetectionEngine:
             # Ensure directory exists
             os.makedirs(file_dir, exist_ok=True)
 
-            # Generate filename with frame index padding (6 digits)
-            filename = f"{file_type}_{frame_index:06d}.png"
+            # 生成包含ROI绝对坐标的文件名格式: 0000xx_x_y.png
+            if (file_type == "mask" or file_type == "roi2") and hasattr(self, 'roi_state') and self.roi_state:
+                # 获取当前ROI在屏幕截图中的绝对坐标
+                x1, y1, x2, y2 = self.roi_state.current_coords
+                # 使用ROI左上角坐标作为文件名
+                filename = f"{frame_index:06d}_{x1:04d}_{y1:04d}.png"
+            else:
+                # 其他文件保持原有命名格式
+                filename = f"{file_type}_{frame_index:06d}.png"
             return os.path.join(file_dir, filename)
 
         except Exception as e:
@@ -1389,6 +1465,71 @@ class VeinDetectionEngine:
 
         except Exception as e:
             self.log_error("Failed to save ROI2 image", e)
+            return False
+
+    def save_original_image(self, original_image: np.ndarray, frame_index: int) -> bool:
+        """Save original image (corresponding to ROI2) in JPG format.
+
+        Args:
+            original_image: Original image as numpy array or PIL Image
+            frame_index: Current frame index
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Check if masks saving is enabled (original images saved with masks for comparison)
+            if not self.config_obj or not self.config_obj.save_masks:
+                return True  # Not an error, just disabled
+
+            # Check if we should only save with detection
+            if self.config_obj.only_save_with_detection and not self.roi_state.tracking_active:
+                return True  # Skip saving but don't error
+
+            # Generate output filename (same as ROI2 but different directory)
+            output_path = self.get_output_filename("roi2", frame_index, create_subdir=True)
+            if not output_path:
+                self.logger.error("Failed to generate original image output filename")
+                return False
+
+            # Save to masks directory with .jpg extension for mask comparison
+            if hasattr(self, 'masks_dir') and self.masks_dir:
+                filename = os.path.basename(output_path)
+                # Change extension from .png to .jpg
+                filename_no_ext = os.path.splitext(filename)[0]
+                filename = filename_no_ext + '.jpg'
+                original_path = os.path.join(self.masks_dir, filename)
+            else:
+                # Fallback to roi2 directory with different extension
+                original_path = output_path.replace('.png', '_original.jpg')
+
+            # Validate output path
+            if not self.validate_output_path(original_path):
+                return False
+
+            # Convert numpy array to PIL Image if needed
+            if hasattr(original_image, 'shape'):
+                # This is a numpy array
+                image_array = original_image
+                if len(image_array.shape) == 3:
+                    # OpenCV BGR to RGB conversion
+                    if image_array.shape[2] == 3:
+                        image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+                    pil_image = Image.fromarray(image_array)
+                else:
+                    pil_image = Image.fromarray(image_array)
+            else:
+                # This is already a PIL Image
+                pil_image = original_image
+
+            # Save as JPG
+            pil_image.save(original_path, "JPEG", quality=95)
+
+            self.logger.debug(f"Original image saved: {original_path}")
+            return True
+
+        except Exception as e:
+            self.log_error("Original image save failed", e)
             return False
 
     def save_mask_image(self, mask: np.ndarray, frame_index: int) -> bool:
@@ -1685,7 +1826,7 @@ class VeinDetectionEngine:
             )
 
             # Step 1: Capture ROI2 region
-            roi2_image = self.capture_roi2_region()
+            roi2_image, original_image = self.capture_roi2_region()
             if roi2_image is None:
                 frame_result.error_message = "Failed to capture ROI2 region"
                 frame_result.processing_time = time.time() - start_time
@@ -1695,6 +1836,10 @@ class VeinDetectionEngine:
             # Store ROI coordinates in result
             if self.roi_state:
                 frame_result.roi_coordinates = self.roi_state.current_coords
+
+            # Step 1.5: Save original image (corresponding to ROI2)
+            if self.save_original_image(original_image, self.frame_index):
+                frame_result.roi2_saved = True
 
             # Step 2: Apply threshold filtering for vein detection
             # Convert PIL Image to numpy array if needed
@@ -1730,7 +1875,25 @@ class VeinDetectionEngine:
                 center_component_mask = self.extract_center_component(components, roi_center)
 
                 if center_component_mask is not None:
-                    # Step 5: Calculate mask centroid for tracking
+                    # Step 5: Calculate mask size for validation
+                    current_mask_size = np.sum(center_component_mask > 0)
+                    self.logger.debug(f"Current mask size: {current_mask_size} pixels")
+
+                    # Step 5.1: Check mask size change
+                    should_accept, reason = self.check_mask_size_change(current_mask_size)
+
+                    if not should_accept:
+                        # Mask size change should be rejected
+                        self.logger.info(f"Detection rejected: {reason}")
+                        frame_result.detection_successful = False
+                        frame_result.error_message = f"Mask size rejected: {reason} ({current_mask_size} pixels)"
+                        # ROI position remains unchanged
+                        return frame_result
+
+                    # Accept detection, proceed with ROI update
+                    self.logger.debug(f"Detection accepted: {reason}")
+
+                    # Step 5.2: Calculate mask centroid for tracking
                     centroid = self.calculate_mask_centroid(center_component_mask)
 
                     if centroid:
@@ -1747,6 +1910,9 @@ class VeinDetectionEngine:
                         # Step 6: Update ROI coordinates to follow absolute centroid
                         self.update_roi_with_centroid(absolute_centroid)
                         frame_result.detection_successful = True
+
+                        # Update last mask size in ROI state
+                        self.roi_state.last_mask_size = current_mask_size
 
                         # Save the center component mask
                         if self.save_mask_image(center_component_mask, self.frame_index):
@@ -1823,7 +1989,8 @@ class VeinDetectionEngine:
                     fallback_coords=(self.config_obj.roi_x1, self.config_obj.roi_y1,
                                    self.config_obj.roi_x2, self.config_obj.roi_y2),
                     tracking_active=False,
-                    consecutive_failures=0
+                    consecutive_failures=0,
+                    last_mask_size=0
                 )
 
             # Initialize video processing if in video mode

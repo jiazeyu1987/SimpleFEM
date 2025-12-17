@@ -10,26 +10,22 @@
   "roi_capture": {
     "frame_rate": 10,
     "roi2_config": {
-      "x1": 1550,
-      "y1": 530,
-      "x2": 1740,
-      "y2": 700,
-      "_comment": "初始ROI2坐标，将在跟踪过程中动态更新"
+      "x1": 1480,
+      "y1": 480,
+      "x2": 1580,
+      "y2": 580,
+      "_comment": "原始ROI2坐标"
     }
   },
   "vein_detection": {
     "threshold_min": 0,
-    "threshold_max": 10,
+    "threshold_max": 30,
     "connectivity": 4,
-    "min_component_size": 50,
+    "min_component_size": 20,
     "tracking": {
       "max_tracking_failures": 5,
       "fallback_to_previous": true,
-      "reset_on_failure": false,
-      "mask_size_lower_limit": 0.8,
-      "_comment_mask_size_lower_limit": "mask大小下限阈值，默认0.8(80%)，小于此变化时不予记录",
-      "mask_size_upper_limit": 1.2,
-      "_comment_mask_size_upper_limit": "mask大小上限阈值，默认1.2(120%)，大于此变化时不予记录"
+      "reset_on_failure": false
     }
   },
   "data_processing": {
@@ -48,7 +44,11 @@
     "_comment_cleanup_export": "是否清理export文件夹：删除CSV统计数据文件。",
     "cleanup_logs": true,
     "_comment_cleanup_logs": "是否清理logs文件夹：删除日志文件。",
-    "directories_to_clean": ["vein_detection_output", "export", "logs"],
+    "directories_to_clean": [
+      "vein_detection_output",
+      "export",
+      "logs"
+    ],
     "_comment_directories_to_clean": "自定义清理目录列表：可修改要清理的文件夹名称。"
   },
   "logging": {
