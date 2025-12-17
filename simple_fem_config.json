@@ -36,7 +36,7 @@
   },
   "peak_detection": {
     "_comment": "波峰检测：先用阈值识别连续高位区间（波峰），再用 pre/post 均值差判定绿/红；支持自适应阈值（基于背景均值）。",
-    "threshold": 95.0,
+    "threshold": 110.0,
     "_comment_threshold": "固定阈值：自适应阈值未启用或历史样本不足时，使用该阈值判为高位。",
     "threshold_minimum": 90.0,
     "_comment_threshold_minimum": "阈值下限：自适应阈值计算结果不会低于此值，确保检测灵敏度。",

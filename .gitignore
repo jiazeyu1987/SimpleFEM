@@ -106,3 +106,7 @@ session_*.pkl
 
 # Claude Code specific
 .claude/
+/video
+/export
+/logs
+/tmp

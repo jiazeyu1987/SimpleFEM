@@ -646,6 +646,10 @@ def run_daemon() -> None:
                     save_roi2,
                     save_wave
                 )
+                # 关键修复：更新ROI保存路径变量
+                roi1_dir = os.path.join(tmp_root, "roi1")
+                roi2_dir = os.path.join(tmp_root, "roi2")
+                wave_dir = os.path.join(tmp_root, "wave")
             else:
                 # Fallback for screen mode or if video stats not initialized
                 session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -774,8 +778,16 @@ def run_daemon() -> None:
                                     save_wave
                                 )
 
+                                # 关键修复：更新ROI保存路径变量
+                                roi1_dir = os.path.join(tmp_root, "roi1")
+                                roi2_dir = os.path.join(tmp_root, "roi2")
+                                wave_dir = os.path.join(tmp_root, "wave")
+
                                 print(f"[video] source_fps={video_fps:.2f} target_fps={effective_frame_rate:.2f} frame_step={video_frame_step}")
                                 print(f"[folders] tmp_root={tmp_root}")
+                                print(f"[folders] roi1_dir={roi1_dir}")
+                                print(f"[folders] roi2_dir={roi2_dir}")
+                                print(f"[folders] wave_dir={wave_dir}")
                                 print("="*50)
 
                                 # 重置帧索引和首帧标志
@@ -858,6 +870,9 @@ def run_daemon() -> None:
 
                 if gray_buffer:
                     curve = list(gray_buffer)
+                    # 调试：输出缓冲区状态
+                    print(f"[DEBUG] Buffer status: len={len(gray_buffer)}, adaptive_frames={adaptive_window_frames}, enabled={adaptive_threshold_enabled}")
+
                     # Calculate adaptive threshold if enabled and enough history is available
                     if (
                         adaptive_threshold_enabled
@@ -894,6 +909,8 @@ def run_daemon() -> None:
                         if not threshold_protection_active:
                             bg_mean = calculated_bg_mean
                             bg_count = recent_frames_count
+                            # 调试：输出背景均值更新信息
+                            print(f"[DEBUG] bg_mean updated: {bg_mean:.2f}, bg_count={bg_count}, buffer_len={len(gray_buffer)}")
                             if adaptive_threshold_enabled and bg_mean > 0:
                                 threshold_used = bg_mean * (1.0 + threshold_over_mean_ratio)
                                 # Apply minimum threshold constraint
@@ -1007,7 +1024,12 @@ def run_daemon() -> None:
                     roi1_path = os.path.join(roi1_dir, f"roi1_{frame_index:06d}.png")
                     try:
                         roi1_image.save(roi1_path)
-                    except Exception:
+                        # 调试：每保存10张图像输出一次日志
+                        if frame_index % 10 == 1:
+                            print(f"[DEBUG] ROI1 saved: {roi1_path}")
+                    except Exception as e:
+                        # 调试：输出保存失败的错误信息
+                        print(f"[ERROR] Failed to save ROI1 {roi1_path}: {e}")
                         # Ignore individual save errors to keep daemon running
                         pass
 
@@ -1040,6 +1062,10 @@ def run_daemon() -> None:
                                 linewidth=1,
                                 label="bg_mean",
                             )
+                        else:
+                            # 调试：输出为什么没有黄线
+                            print(f"[DEBUG] No bg_mean line: bg_count={bg_count}, buffer_len={len(gray_buffer)}, adaptive_frames={adaptive_window_frames}, adaptive_enabled={adaptive_threshold_enabled}")
+                            print(f"[DEBUG] protection_active={threshold_protection_active}, bg_mean={bg_mean}")
 
                         # Draw current threshold used for peak detection
                         threshold_color = "red" if threshold_protection_active else "orange"
