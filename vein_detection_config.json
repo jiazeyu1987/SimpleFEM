@@ -1,21 +1,27 @@
 {
   "_comment": "Vein Detection Following Configuration - 使用与simple_fem_config.json相同的格式",
-  "processing_mode": "screen",
+  "processing_mode": "video",
+  "video_processing": {
+    "_comment": "processing_mode=video 时生效：从本地视频文件夹依次读取所有视频文件作为输入。video_path可以是单个视频文件或视频文件夹路径。",
+    "video_path": "vein_video",
+    "loop_enabled": false,
+    "frame_step": 1
+  },
   "roi_capture": {
     "frame_rate": 10,
     "roi2_config": {
-      "x1": 1480,
-      "y1": 480,
-      "x2": 1580,
-      "y2": 580,
+      "x1": 1600,
+      "y1": 580,
+      "x2": 1700,
+      "y2": 680,
       "_comment": "初始ROI2坐标，将在跟踪过程中动态更新"
     }
   },
   "vein_detection": {
     "threshold_min": 0,
-    "threshold_max": 10,
+    "threshold_max": 210,
     "connectivity": 4,
-    "min_component_size": 50,
+    "min_component_size": 5,
     "tracking": {
       "max_tracking_failures": 5,
       "fallback_to_previous": true,
@@ -28,8 +34,21 @@
     "only_save_with_detection": false,
     "create_roi2_subdir": true
   },
+  "startup_cleanup": {
+    "_comment": "程序启动时的清理功能配置：控制是否自动删除历史数据文件夹。",
+    "enabled": true,
+    "_comment_enabled": "是否启用启动时清理功能：true表示启动时自动删除指定文件夹内容。",
+    "cleanup_vein_detection_output": true,
+    "_comment_cleanup_vein_detection_output": "是否清理vein_detection_output文件夹：删除静脉检测输出文件。",
+    "cleanup_export": true,
+    "_comment_cleanup_export": "是否清理export文件夹：删除CSV统计数据文件。",
+    "cleanup_logs": true,
+    "_comment_cleanup_logs": "是否清理logs文件夹：删除日志文件。",
+    "directories_to_clean": ["vein_detection_output", "export", "logs"],
+    "_comment_directories_to_clean": "自定义清理目录列表：可修改要清理的文件夹名称。"
+  },
   "logging": {
-    "level": "INFO",
+    "level": "DEBUG",
     "file_name": "vein_detector.log",
     "rotate_daily": true,
     "backup_count": 7

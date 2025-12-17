@@ -9,16 +9,19 @@ Usage:
     python auto_vein_detector.py [--config vein_detection_config.json]
 """
 
+import csv
 import json
 import logging
 import logging.handlers
 import os
+import shutil
 import sys
 import time
 import argparse
+import glob
 from collections import deque
 from datetime import datetime
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple, Any
 
 import numpy as np
 from PIL import Image, ImageGrab
@@ -185,6 +188,75 @@ class VeinDetectionConfig:
         )
 
 
+# Video Processing Functions for vein_video mode
+def discover_vein_video_files(video_path: str) -> List[str]:
+    """发现 vein_video 文件夹中的所有视频文件"""
+    if not os.path.exists(video_path):
+        raise ValueError(f"Video directory does not exist: {video_path}")
+
+    # 支持的视频文件扩展名
+    video_extensions = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv', '*.flv', '*.webm']
+
+    video_files = []
+    for ext in video_extensions:
+        # 搜索文件夹中的匹配文件
+        pattern = os.path.join(video_path, ext)
+        video_files.extend(glob.glob(pattern))
+        # 也搜索大写扩展名
+        pattern = os.path.join(video_path, ext.upper())
+        video_files.extend(glob.glob(pattern))
+
+    # 去重并排序
+    video_files = sorted(list(set(video_files)))
+
+    if not video_files:
+        raise ValueError(f"No video files found in directory: {video_path}")
+
+    return video_files
+
+
+def initialize_vein_video_capture(video_path: str):
+    """初始化视频捕获器"""
+    video_cap = cv2.VideoCapture(video_path)
+    if not video_cap.isOpened():
+        raise ValueError(f"Cannot open video file: {video_path}")
+    video_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 减少缓冲
+    return video_cap
+
+
+def get_vein_video_frame(video_cap, loop_enabled: bool = False, frame_step: int = 1):
+    """
+    从视频获取帧，返回PIL图像或None。
+
+    frame_step>1 时，会在视频时间轴上"跳帧取样"：每次返回 1 帧，并将读取位置前进约 frame_step 帧。
+    这让 roi_capture.frame_rate 在 video 模式下真正对应"每秒采样多少帧"，而不是仅仅降低处理速度。
+    """
+    if frame_step is None:
+        frame_step = 1
+    try:
+        frame_step = int(frame_step)
+    except Exception:
+        frame_step = 1
+    frame_step = max(1, frame_step)
+
+    frame = None
+    for _ in range(frame_step):
+        ret, frame = video_cap.read()
+        if ret:
+            continue
+        if not loop_enabled:
+            return None
+        video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret, frame = video_cap.read()
+        if not ret:
+            return None
+
+    if frame is None:
+        return None
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(rgb_frame)
+
+
 def _get_base_dir() -> str:
     """
     Resolve base directory both for source (.py) and frozen (.exe) modes.
@@ -210,6 +282,105 @@ def _setup_import_paths() -> None:
 
 _setup_import_paths()
 
+# Import statistics management classes from simple_roi_daemon
+try:
+    from safe_peak_statistics import SafePeakStatistics
+except ImportError:
+    print("Warning: SafePeakStatistics not available, statistics will be disabled")
+    SafePeakStatistics = None
+
+
+class VideoStatisticsManager:
+    """管理每视频的统计实例"""
+
+    def __init__(self):
+        self.current_statistics: Optional[SafePeakStatistics] = None
+        self.all_statistics: List[SafePeakStatistics] = []
+        self.is_batch_mode = False
+        self.session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def initialize_for_video(self, video_path: str, is_batch: bool = False):
+        """为视频初始化新的统计实例"""
+        if SafePeakStatistics is None:
+            return None
+
+        # 关闭之前的统计
+        if self.current_statistics:
+            try:
+                self.current_statistics.export_final_csv()
+            except Exception as e:
+                print(f"Warning: Failed to export previous statistics: {e}")
+            self.all_statistics.append(self.current_statistics)
+
+        # 创建新的统计实例
+        self.is_batch_mode = is_batch
+        video_name = os.path.basename(video_path) if video_path else None
+
+        try:
+            self.current_statistics = SafePeakStatistics(
+                video_name=video_name,
+                is_batch_mode=is_batch
+            )
+        except TypeError as e:
+            # Fallback if parameter names don't match
+            print(f"SafePeakStatistics parameter error: {e}")
+            self.current_statistics = SafePeakStatistics(video_name=video_name)
+
+        return self.current_statistics
+
+    def get_global_summary(self) -> Dict[str, Any]:
+        """聚合所有视频的汇总信息"""
+        if not self.all_statistics:
+            return {
+                'total_videos_processed': 0,
+                'total_peaks': 0,
+                'total_green_peaks': 0,
+                'total_red_peaks': 0,
+                'session_duration': '00:00:00',
+                'videos_processed': []
+            }
+
+        total_peaks = sum(len(s.stats_data) for s in self.all_statistics)
+        total_green = sum(len([p for p in s.stats_data if p.get('peak_type') == 'green'])
+                         for s in self.all_statistics)
+        total_red = sum(len([p for p in s.stats_data if p.get('peak_type') == 'red'])
+                       for s in self.all_statistics)
+
+        session_start_dt = datetime.strptime(self.session_start, "%Y%m%d_%H%M%S")
+        session_duration = str(datetime.now() - session_start_dt).split('.')[0]
+
+        return {
+            'total_videos_processed': len(self.all_statistics),
+            'total_peaks': total_peaks,
+            'total_green_peaks': total_green,
+            'total_red_peaks': total_red,
+            'session_duration': session_duration,
+            'videos_processed': [s.video_name for s in self.all_statistics if s.video_name]
+        }
+
+    def export_all_statistics(self):
+        """导出所有统计的最终汇总"""
+        if self.current_statistics:
+            self.current_statistics.export_final_csv()
+            self.all_statistics.append(self.current_statistics)
+            self.current_statistics = None
+
+        # 导出全局汇总
+        summary = self.get_global_summary()
+        summary_path = os.path.join(BASE_DIR, "export", f"global_summary_{self.session_start}.csv")
+
+        try:
+            with open(summary_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Metric', 'Value'])
+                writer.writerow(['Total Videos Processed', summary['total_videos_processed']])
+                writer.writerow(['Total Peaks', summary['total_peaks']])
+                writer.writerow(['Total Green Peaks', summary['total_green_peaks']])
+                writer.writerow(['Total Red Peaks', summary['total_red_peaks']])
+                writer.writerow(['Session Duration', summary['session_duration']])
+        except Exception as e:
+            print(f"Failed to export global summary: {e}")
+
 
 class VeinDetectionEngine:
     """Main class for automatic vein detection and ROI tracking."""
@@ -226,6 +397,19 @@ class VeinDetectionEngine:
         # Initialize state management
         self.roi_state = None
         self.processing_times = deque(maxlen=100)  # Track last 100 frame processing times
+
+        # Video processing components
+        self.statistics_manager = VideoStatisticsManager()
+        self.current_statistics = None
+        self.video_files = []
+        self.current_video_index = 0
+        self.current_video_cap = None
+        self.output_base = None
+        self.roi2_dir = None
+        self.masks_dir = None
+
+        # Perform startup cleanup if configured
+        self.perform_startup_cleanup()
 
     def load_configuration(self) -> bool:
         """Load and validate configuration with error handling."""
@@ -429,7 +613,7 @@ class VeinDetectionEngine:
                 self.logger.info(f"Average processing time: {avg_time*1000:.1f}ms (~{current_fps:.1f} FPS)")
 
     def capture_roi2_region(self, coords: Optional[Tuple[int, int, int, int]] = None) -> Optional[Image.Image]:
-        """Capture ROI2 region using PIL.ImageGrab following SimpleFEM patterns."""
+        """支持屏幕和视频两种模式的 ROI2 捕获"""
         try:
             # Use provided coordinates or current ROI state coordinates
             if coords is None and self.roi_state:
@@ -448,16 +632,199 @@ class VeinDetectionEngine:
                 self.logger.error(f"Invalid ROI coordinates: ({x1}, {y1}, {x2}, {y2})")
                 return None
 
-            # Capture screen using PIL.ImageGrab (same as simple_roi_daemon.py)
-            screen = ImageGrab.grab()
-            roi_image = screen.crop((x1, y1, x2, y2))
+            if self.config_obj.processing_mode == "video":
+                # 视频模式逻辑
+                frame = self.get_current_video_frame()
+                if frame is None:
+                    return None
 
-            self.logger.debug(f"Captured ROI2 region: {coords} -> size: {roi_image.size}")
+                # 从视频帧中裁剪 ROI
+                roi_image = frame.crop((x1, y1, x2, y2))
+                self.logger.debug(f"Video ROI2 captured: {coords} -> size: {roi_image.size}")
+            else:
+                # 屏幕模式逻辑 (保持原有)
+                screen = ImageGrab.grab()
+                roi_image = screen.crop((x1, y1, x2, y2))
+                self.logger.debug(f"Screen ROI2 captured: {coords} -> size: {roi_image.size}")
+
             return roi_image
 
         except Exception as e:
             self.log_error("ROI2 capture failed", e)
             return None
+
+    def get_current_video_frame(self) -> Optional[Image.Image]:
+        """获取当前视频帧"""
+        if hasattr(self, 'current_video_cap') and self.current_video_cap:
+            loop_enabled = self.config.get("video_processing", {}).get("loop_enabled", False)
+            frame_step = self.config.get("video_processing", {}).get("frame_step", 1)
+            return get_vein_video_frame(self.current_video_cap, loop_enabled, frame_step)
+        return None
+
+    def initialize_video_processing(self):
+        """初始化视频处理"""
+        if self.config_obj.processing_mode == "video":
+            video_path = self.config.get("video_processing", {}).get("video_path", "vein_video")
+            try:
+                self.video_files = discover_vein_video_files(video_path)
+                if self.video_files:
+                    self.current_video_index = 0
+                    first_video = self.video_files[0]
+                    self.current_video_cap = initialize_vein_video_capture(first_video)
+                    self.initialize_video_statistics(first_video)
+                    print(f"视频模式: 发现 {len(self.video_files)} 个视频文件")
+                    print(f"第一个视频: {os.path.basename(first_video)}")
+                else:
+                    raise ValueError(f"No video files found in {video_path}")
+            except Exception as e:
+                self.logger.error(f"视频初始化失败: {e}")
+                raise
+
+    def initialize_video_statistics(self, video_path: str):
+        """为视频初始化统计实例"""
+        self.current_statistics = self.statistics_manager.initialize_for_video(
+            video_path,  # positional argument
+            True        # is_batch argument
+        )
+        if self.current_statistics:
+            self.logger.info(f"Statistics initialized for video: {os.path.basename(video_path)}")
+
+    def handle_video_switch(self):
+        """处理视频文件切换"""
+        try:
+            # 导出当前视频的统计
+            if self.current_statistics:
+                self.current_statistics.export_final_csv()
+                self.logger.info(f"Exported statistics for current video")
+
+            # 释放当前视频资源
+            if hasattr(self, 'current_video_cap') and self.current_video_cap:
+                self.current_video_cap.release()
+
+            # 切换到下一个视频
+            if self.current_video_index < len(self.video_files):
+                next_video_path = self.video_files[self.current_video_index]
+
+                # 初始化新视频
+                self.current_video_cap = initialize_vein_video_capture(next_video_path)
+                self.initialize_video_statistics(next_video_path)
+
+                # 创建新的输出目录结构
+                self.setup_output_directories()
+
+                self.current_video_index += 1
+                self.frame_index = 0  # 重置帧索引
+                print(f"切换到视频: {os.path.basename(next_video_path)}")
+                print(f"输出目录: {self.output_base}")
+                self.logger.info(f"Switched to video: {os.path.basename(next_video_path)}")
+            else:
+                # 所有视频处理完成
+                self.finish_batch_processing()
+
+        except Exception as e:
+            self.logger.error(f"视频切换失败: {e}")
+            self.running = False
+
+    def finish_batch_processing(self):
+        """完成批量处理"""
+        try:
+            self.logger.info("=== 所有视频处理完成 ===")
+
+            # 导出最终统计
+            self.statistics_manager.export_all_statistics()
+
+            # 显示处理汇总
+            summary = self.statistics_manager.get_global_summary()
+            print(f"\n=== 批量处理汇总 ===")
+            print(f"处理视频数量: {summary['total_videos_processed']}")
+            print(f"总检测数: {summary['total_peaks']}")
+            print(f"处理时长: {summary['session_duration']}")
+            print(f"处理的视频: {', '.join(summary['videos_processed'])}")
+
+            # 停止处理
+            self.running = False
+
+        except Exception as e:
+            self.logger.error(f"批量处理完成时出错: {e}")
+
+    def add_vein_detection_result_to_statistics(self, frame_result: FrameResult):
+        """将静脉检测结果添加到统计中"""
+        if self.current_statistics and frame_result.detection_successful:
+            try:
+                # 这里可以扩展SafePeakStatistics来支持静脉检测的特定统计
+                # 暂时使用基础的添加逻辑
+                self.logger.debug(f"Adding vein detection result to statistics: frame {frame_result.frame_index}")
+            except Exception as e:
+                self.logger.error(f"Failed to add detection result to statistics: {e}")
+
+    def perform_startup_cleanup(self) -> None:
+        """执行启动时清理功能，仿照 simple_roi_daemon.py 的实现"""
+        try:
+            # 使用默认配置，因为此时配置可能还没有加载
+            cleanup_config = {
+                "enabled": True,
+                "cleanup_vein_detection_output": True,
+                "cleanup_export": True,
+                "cleanup_logs": True,
+                "directories_to_clean": ["vein_detection_output", "export", "logs"]
+            }
+
+            # 尝试从配置文件读取清理配置（如果可用）
+            try:
+                if os.path.exists(self.config_path):
+                    with open(self.config_path, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                        cleanup_config = config.get("startup_cleanup", cleanup_config)
+            except Exception:
+                # 如果读取配置失败，使用默认配置
+                pass
+
+            # 检查是否启用清理功能
+            if not cleanup_config.get("enabled", True):
+                return
+
+            # 获取要清理的目录列表
+            directories_to_clean = cleanup_config.get("directories_to_clean", ["vein_detection_output", "export", "logs"])
+
+            # 检查各个目录的清理开关
+            cleanup_switches = {
+                "vein_detection_output": cleanup_config.get("cleanup_vein_detection_output", True),
+                "export": cleanup_config.get("cleanup_export", True),
+                "logs": cleanup_config.get("cleanup_logs", True)
+            }
+
+            cleaned_count = 0
+
+            print("开始启动时清理...")
+
+            for dir_name in directories_to_clean:
+                # 检查该目录是否被标记为可清理
+                if dir_name not in cleanup_switches or not cleanup_switches[dir_name]:
+                    continue
+
+                dir_path = os.path.join(BASE_DIR, dir_name)
+
+                if not os.path.exists(dir_path):
+                    continue
+
+                try:
+                    # 删除目录中的所有文件和子目录
+                    shutil.rmtree(dir_path)
+
+                    # 重新创建空目录
+                    os.makedirs(dir_path, exist_ok=True)
+
+                    cleaned_count += 1
+                    print(f"已清理目录: {dir_name}")
+
+                except Exception as e:
+                    print(f"清理目录 {dir_name} 失败: {e}")
+
+            if cleaned_count > 0:
+                print(f"启动清理完成，共清理了 {cleaned_count} 个目录")
+
+        except Exception as e:
+            print(f"启动清理过程中出现错误: {e}")
 
     def get_screen_size(self) -> Tuple[int, int]:
         """Get current screen size."""
@@ -653,9 +1020,32 @@ class VeinDetectionEngine:
             center_label = labels[cy, cx]
 
             if center_label == 0:
-                # No component at center point
-                self.logger.debug(f"No connected component at center point ({cx}, {cy})")
-                return None
+                # No component at exact center point - find the largest component
+                self.logger.debug(f"No connected component at exact center point ({cx}, {cy})")
+
+                # Find all unique labels (excluding background)
+                unique_labels = np.unique(labels)
+                unique_labels = unique_labels[unique_labels > 0]
+
+                if len(unique_labels) == 0:
+                    self.logger.debug("No connected components found")
+                    return None
+
+                # Find the largest component by area
+                largest_label = 0
+                largest_area = 0
+                for label in unique_labels:
+                    area = np.sum(labels == label)
+                    if area > largest_area:
+                        largest_area = area
+                        largest_label = label
+
+                if largest_label > 0:
+                    self.logger.debug(f"Using largest component: label {largest_label}, area {largest_area}")
+                    center_label = largest_label
+                else:
+                    self.logger.debug("No valid connected components found")
+                    return None
 
             # Create binary mask for the center component
             center_mask = (labels == center_label).astype(np.uint8) * 255
@@ -788,28 +1178,44 @@ class VeinDetectionEngine:
             self.logger.info(f"Total frames processed: {self.frame_index}")
 
     def setup_output_directories(self) -> bool:
-        """Setup output directories for ROI2 images and masks."""
+        """设置输出目录结构，支持屏幕和视频两种模式"""
         try:
-            base_dir = os.path.join(BASE_DIR, "vein_detection_output")
+            if self.config_obj.processing_mode == "video":
+                # 视频模式：创建视频特定的文件夹结构
+                if hasattr(self, 'current_statistics') and self.current_statistics:
+                    # 使用 SafePeakStatistics 的会话ID创建文件夹
+                    session_id = self.current_statistics.session_id
+                    self.output_base = os.path.join(
+                        BASE_DIR,
+                        "vein_detection_output",
+                        session_id
+                    )
+                else:
+                    # 回退到会话时间戳
+                    session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    self.output_base = os.path.join(
+                        BASE_DIR,
+                        "vein_detection_output",
+                        session_start
+                    )
+            else:
+                # 屏幕模式：保持原有逻辑
+                self.output_base = os.path.join(BASE_DIR, "vein_detection_output")
 
-            # Create main output directory
-            if not os.path.exists(base_dir):
-                os.makedirs(base_dir)
-                self.logger.info(f"Created output directory: {base_dir}")
+            # Create base directory
+            os.makedirs(self.output_base, exist_ok=True)
+            self.logger.info(f"Output base directory: {self.output_base}")
 
-            # Create ROI2 subdirectory if enabled
+            # Create ROI2 and masks subdirectories
             if self.config_obj and self.config_obj.save_roi2:
-                roi2_dir = os.path.join(base_dir, "roi2")
-                if not os.path.exists(roi2_dir):
-                    os.makedirs(roi2_dir)
-                    self.logger.info(f"Created ROI2 directory: {roi2_dir}")
+                self.roi2_dir = os.path.join(self.output_base, "roi2")
+                os.makedirs(self.roi2_dir, exist_ok=True)
+                self.logger.info(f"ROI2 directory: {self.roi2_dir}")
 
-            # Create masks subdirectory if enabled
             if self.config_obj and self.config_obj.save_masks:
-                masks_dir = os.path.join(base_dir, "masks")
-                if not os.path.exists(masks_dir):
-                    os.makedirs(masks_dir)
-                    self.logger.info(f"Created masks directory: {masks_dir}")
+                self.masks_dir = os.path.join(self.output_base, "masks")
+                os.makedirs(self.masks_dir, exist_ok=True)
+                self.logger.info(f"Masks directory: {self.masks_dir}")
 
             return True
 
@@ -832,16 +1238,18 @@ class VeinDetectionEngine:
             Full path to output file
         """
         try:
-            base_dir = os.path.join(BASE_DIR, "vein_detection_output")
-
-            if create_subdir:
-                file_dir = os.path.join(base_dir, file_type)
+            # 使用已设置的目录结构
+            if file_type == "roi2" and self.roi2_dir:
+                file_dir = self.roi2_dir
+            elif file_type == "mask" and self.masks_dir:
+                file_dir = self.masks_dir
             else:
-                file_dir = base_dir
+                # 回退到原有逻辑
+                base_dir = self.output_base or os.path.join(BASE_DIR, "vein_detection_output")
+                file_dir = os.path.join(base_dir, file_type)
 
             # Ensure directory exists
-            if not os.path.exists(file_dir):
-                os.makedirs(file_dir)
+            os.makedirs(file_dir, exist_ok=True)
 
             # Generate filename with frame index padding (6 digits)
             filename = f"{file_type}_{frame_index:06d}.png"
@@ -1275,23 +1683,36 @@ class VeinDetectionEngine:
                 self.handle_detection_failure(self.frame_index)
             else:
                 # Step 4: Get ROI center point for component selection
-                roi_center = self.get_roi_center()
-                if roi_center is None:
+                roi_center_absolute = self.get_roi_center()
+                if roi_center_absolute is None:
                     # Use image center as fallback
                     height, width = roi2_array.shape[:2]
                     roi_center = (width // 2, height // 2)
+                else:
+                    # Convert absolute center to relative coordinates for component extraction
+                    current_x1, current_y1, _, _ = self.roi_state.current_coords
+                    roi_center = (roi_center_absolute[0] - current_x1, roi_center_absolute[1] - current_y1)
 
-                # Adjust center point to be relative to the thresholded image coordinates
-                # Since components is already a mask of the detected areas, we can use it directly
-                center_component_mask = components  # This is already the filtered mask of detected components
+                # Extract the component that contains the ROI center point
+                center_component_mask = self.extract_center_component(components, roi_center)
 
                 if center_component_mask is not None:
                     # Step 5: Calculate mask centroid for tracking
                     centroid = self.calculate_mask_centroid(center_component_mask)
 
                     if centroid:
-                        # Step 6: Update ROI coordinates to follow centroid
-                        self.update_roi_with_centroid(centroid)
+                        # Convert ROI-relative centroid to absolute coordinates
+                        # centroid is relative to ROI2 region, need to convert to screen/video coordinates
+                        current_x1, current_y1, _, _ = self.roi_state.current_coords
+                        absolute_centroid = (current_x1 + centroid[0], current_y1 + centroid[1])
+
+                        # Debug logging
+                        self.logger.debug(f"ROI-relative centroid: {centroid}")
+                        self.logger.debug(f"Current ROI: {self.roi_state.current_coords}")
+                        self.logger.debug(f"Absolute centroid: {absolute_centroid}")
+
+                        # Step 6: Update ROI coordinates to follow absolute centroid
+                        self.update_roi_with_centroid(absolute_centroid)
                         frame_result.detection_successful = True
 
                         # Save the center component mask
@@ -1372,6 +1793,20 @@ class VeinDetectionEngine:
                     consecutive_failures=0
                 )
 
+            # Initialize video processing if in video mode
+            if self.config_obj.processing_mode == "video":
+                try:
+                    print("Initializing video processing...")
+                    self.initialize_video_processing()
+                except Exception as e:
+                    print(f"Failed to initialize video processing: {e}")
+                    print("Please ensure:")
+                    print("1. The 'vein_video' folder exists")
+                    print("2. There are video files in the folder")
+                    print("3. Video files are in supported formats (.mp4, .avi, .mov, etc.)")
+                    self.logger.error(f"Failed to initialize video processing: {e}")
+                    return
+
             # Setup output directories
             if not self.setup_output_directories():
                 self.logger.error("Failed to setup output directories, aborting")
@@ -1383,14 +1818,19 @@ class VeinDetectionEngine:
             # Log startup information
             self.logger.info("=== Vein Detection Following System Started ===")
             if self.config_obj:
+                self.logger.info(f"Processing mode: {self.config_obj.processing_mode}")
                 self.logger.info(f"Target frame rate: {self.config_obj.frame_rate} FPS")
                 self.logger.info(f"Initial ROI coordinates: {self.roi_state.current_coords}")
                 self.logger.info(f"Detection threshold: {self.config_obj.threshold_min}-{self.config_obj.threshold_max}")
-                self.logger.info(f"Output directory: {os.path.join(BASE_DIR, 'vein_detection_output')}")
+                self.logger.info(f"Output directory: {self.output_base}")
 
-            print("\nVein detection started. Press Ctrl+C to stop.")
+            print(f"\nVein detection started ({self.config_obj.processing_mode} mode). Press Ctrl+C to stop.")
             print(f"Processing at {self.config_obj.frame_rate} FPS...")
             print(f"ROI coordinates: {self.roi_state.current_coords}")
+
+            if self.config_obj.processing_mode == "video" and hasattr(self, 'video_files'):
+                print(f"Videos to process: {len(self.video_files)}")
+                print(f"First video: {os.path.basename(self.video_files[0]) if self.video_files else 'N/A'}")
 
             # Main processing loop
             consecutive_failures = 0
@@ -1401,12 +1841,23 @@ class VeinDetectionEngine:
                     # Process single frame
                     frame_result = self.process_single_frame()
 
+                    # Check if we need to switch videos (video mode)
+                    if self.config_obj.processing_mode == "video":
+                        # If frame_result indicates no frame captured (None frame), try to switch video
+                        if (frame_result.error_message and "Failed to capture ROI2 region" in frame_result.error_message):
+                            self.logger.info("No more frames in current video, switching to next video")
+                            self.handle_video_switch()
+                            if not self.running:  # Check if all videos are done
+                                break
+                            continue  # Continue to next iteration with new video
+
                     # Increment frame counter
                     self.frame_index += 1
 
-                    # Reset consecutive failures on success
+                    # Add detection result to statistics if successful
                     if frame_result.detection_successful:
                         consecutive_failures = 0
+                        self.add_vein_detection_result_to_statistics(frame_result)
                     else:
                         consecutive_failures += 1
 
@@ -1466,6 +1917,29 @@ class VeinDetectionEngine:
 
         finally:
             self.running = False
+            # Cleanup video resources
+            self.cleanup_resources()
+
+    def cleanup_resources(self) -> None:
+        """Clean up video capture and statistics resources."""
+        try:
+            # Release video capture resources
+            if hasattr(self, 'current_video_cap') and self.current_video_cap:
+                self.current_video_cap.release()
+                self.current_video_cap = None
+                self.logger.info("Video capture resources released")
+
+            # Export final statistics
+            if hasattr(self, 'statistics_manager') and self.statistics_manager:
+                if self.config_obj.processing_mode == "video":
+                    self.statistics_manager.export_all_statistics()
+                self.logger.info("Statistics resources finalized")
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Resource cleanup failed: {e}")
+            else:
+                print(f"Resource cleanup failed: {e}")
 
     def log_shutdown_statistics(self) -> None:
         """Log comprehensive shutdown statistics."""
