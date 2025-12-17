@@ -9,8 +9,8 @@
     "only_delect": false
   },
   "video_processing": {
-    "_comment": "processing_mode=video 时生效：从本地视频读取帧作为输入。",
-    "video_path": "123.mp4",
+    "_comment": "processing_mode=video 时生效：从本地视频文件夹依次读取所有视频文件作为输入。video_path可以是单个视频文件或视频文件夹路径。",
+    "video_path": "video",
     "loop_enabled": false
   },
   "roi_capture": {
@@ -100,7 +100,7 @@
   },
   "startup_cleanup": {
     "_comment": "程序启动时的清理功能配置：控制是否自动删除历史数据文件夹。",
-    "enabled": false,
+    "enabled": true,
     "_comment_enabled": "是否启用启动时清理功能：true表示启动时自动删除指定文件夹内容。",
     "cleanup_export": true,
     "_comment_cleanup_export": "是否清理export文件夹：删除CSV统计数据文件。",

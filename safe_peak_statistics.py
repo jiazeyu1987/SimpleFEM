@@ -33,21 +33,30 @@ BASE_DIR = _get_base_dir()
 class SafePeakStatistics:
     """安全的波峰统计管理类"""
 
-    def __init__(self):
+    def __init__(self, video_name: Optional[str] = None, is_batch_mode: bool = False):
         self.lock = threading.Lock()
         self.recent_peaks: List[Dict[str, Any]] = []
         self.max_recent_peaks = 5  # 去重检查窗口
         self.stats_data: List[Dict[str, Any]] = []
         self.start_time = datetime.now()
-        self.session_id = self.start_time.strftime("%Y%m%d_%H%M%S")
+        self.video_name = video_name
+        self.is_batch_mode = is_batch_mode
 
-        # 文件路径 - 保存到export文件夹
+        # 会话ID策略
+        if is_batch_mode and video_name:
+            # 批量模式：使用视频名称 + 时间戳
+            sanitized_name = self._sanitize_filename(video_name)
+            self.session_id = f"{sanitized_name}_{self.start_time.strftime('%Y%m%d_%H%M%S')}"
+        else:
+            # 单视频或屏幕模式：原有行为
+            self.session_id = self.start_time.strftime("%Y%m%d_%H%M%S")
+
+        # 文件路径 - 统一保存到export文件夹
         export_dir = os.path.join(BASE_DIR, "export")
         os.makedirs(export_dir, exist_ok=True)
 
         self.csv_filename = f"peak_statistics_{self.session_id}.csv"
         self.csv_path = os.path.join(export_dir, self.csv_filename)
-        self.final_export_path = os.path.join(export_dir, f"peak_statistics_final_{self.session_id}.csv")
 
         # 配置参数（根据task要求）
         self.duplicate_check_window = 5  # 检查最近5个波峰
@@ -84,7 +93,21 @@ class SafePeakStatistics:
         # 初始化CSV文件（程序开始时记录）
         self._initialize_csv_file()
         self._add_log(f"SafePeakStatistics初始化完成，会话ID: {self.session_id}")
+        if self.video_name:
+            self._add_log(f"视频名称: {self.video_name}, 批量模式: {self.is_batch_mode}")
         self._add_log(f"连续同色去重配置: 窗口={self.consecutive_frame_window}帧, 启用={self.consecutive_deduplication_enabled}")
+
+    def _sanitize_filename(self, filename: str) -> str:
+        """清理视频文件名用于文件夹和文件命名"""
+        import re
+        # 去除文件扩展名
+        name_without_ext = os.path.splitext(filename)[0]
+        # 替换无效字符为下划线
+        sanitized = re.sub(r'[<>:"/\\|?*]', '_', name_without_ext)
+        # 去除开头和结尾的点和下划线，限制长度
+        sanitized = sanitized.strip('._')[:50]
+        # 如果清理后为空，使用默认名称
+        return sanitized or f"video_{int(self.start_time.timestamp())}"
 
     def _initialize_csv_file(self):
         """初始化CSV文件，写入表头（程序开始时记录）"""
@@ -530,33 +553,19 @@ class SafePeakStatistics:
 
     
     def export_final_csv(self) -> Optional[str]:
-        """程序结束时导出最终CSV文件"""
+        """程序结束时返回CSV文件路径（不再创建final文件）"""
         try:
-            self._add_log("开始导出最终CSV文件...")
+            self._add_log("完成数据收集，返回CSV文件路径...")
 
             if not os.path.exists(self.csv_path):
                 self._add_log("没有数据文件可导出")
                 return None
 
-            # 创建最终导出文件
-            shutil.copy2(self.csv_path, self.final_export_path)
-
-            # 添加导出时间戳
-            with open(self.final_export_path, 'a', newline='', encoding='utf-8-sig') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow([
-                    f"# EXPORT_SUMMARY",
-                    f"export_time,{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    f"total_peaks,{len(self.stats_data)}",
-                    f"session_duration,{str(datetime.now() - self.start_time).split('.')[0]}",
-                    f"session_id,{self.session_id}"
-                ])
-
-            self._add_log(f"最终CSV文件已导出至: {self.final_export_path}")
-            return os.path.abspath(self.final_export_path)
+            self._add_log(f"CSV文件路径: {self.csv_path}")
+            return os.path.abspath(self.csv_path)
 
         except Exception as e:
-            self._add_log(f"导出最终CSV文件失败: {e}", level="ERROR")
+            self._add_log(f"返回CSV文件路径失败: {e}", level="ERROR")
             return None
 
     def get_statistics_summary(self) -> Dict[str, Any]:

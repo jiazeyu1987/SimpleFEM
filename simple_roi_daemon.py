@@ -19,12 +19,13 @@ import sys
 import time
 from collections import deque
 from datetime import datetime
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageGrab
 import cv2
 import matplotlib.pyplot as plt
+import glob
 
 
 def manage_threshold_protection(
@@ -145,7 +146,135 @@ _setup_import_paths()
 
 from peak_detection import detect_peaks  # type: ignore  # noqa: E402
 from green_detector import detect_green_intersection  # type: ignore  # noqa: E402
-from safe_peak_statistics import safe_statistics  # type: ignore  # noqa: E402
+from safe_peak_statistics import SafePeakStatistics  # type: ignore  # noqa: E402
+
+
+class VideoStatisticsManager:
+    """管理每视频的统计实例"""
+
+    def __init__(self):
+        self.current_statistics: Optional[SafePeakStatistics] = None
+        self.all_statistics: List[SafePeakStatistics] = []
+        self.is_batch_mode = False
+        self.session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def initialize_for_video(self, video_path: str, is_batch: bool = False):
+        """为视频初始化新的统计实例"""
+        # 关闭之前的统计
+        if self.current_statistics:
+            self.current_statistics.export_final_csv()
+            self.all_statistics.append(self.current_statistics)
+
+        # 创建新的统计实例
+        self.is_batch_mode = is_batch
+        video_name = os.path.basename(video_path) if video_path else None
+        self.current_statistics = SafePeakStatistics(
+            video_name=video_name,
+            is_batch_mode=is_batch
+        )
+
+        return self.current_statistics
+
+    def get_global_summary(self) -> Dict[str, Any]:
+        """聚合所有视频的汇总信息"""
+        if not self.all_statistics:
+            return {
+                'total_videos_processed': 0,
+                'total_peaks': 0,
+                'total_green_peaks': 0,
+                'total_red_peaks': 0,
+                'session_duration': '00:00:00',
+                'videos_processed': []
+            }
+
+        total_peaks = sum(len(s.stats_data) for s in self.all_statistics)
+        total_green = sum(len([p for p in s.stats_data if p['peak_type'] == 'green'])
+                         for s in self.all_statistics)
+        total_red = sum(len([p for p in s.stats_data if p['peak_type'] == 'red'])
+                       for s in self.all_statistics)
+
+        session_start_dt = datetime.strptime(self.session_start, "%Y%m%d_%H%M%S")
+        session_duration = str(datetime.now() - session_start_dt).split('.')[0]
+
+        return {
+            'total_videos_processed': len(self.all_statistics),
+            'total_peaks': total_peaks,
+            'total_green_peaks': total_green,
+            'total_red_peaks': total_red,
+            'session_duration': session_duration,
+            'videos_processed': [s.video_name for s in self.all_statistics]
+        }
+
+
+# 全局统计管理器实例
+statistics_manager = VideoStatisticsManager()
+
+# 为了向后兼容，保持原有的safe_statistics全局变量
+safe_statistics = statistics_manager.current_statistics
+
+
+def _sanitize_video_name(video_name: str) -> str:
+    """清理视频名称用于文件夹创建"""
+    import re
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', video_name)
+    sanitized = sanitized.strip('._')[:50]
+    return sanitized or f"video_{int(time.time())}"
+
+
+def _create_video_folders(video_path: str, session_id: str, processing_mode: str, save_roi1: bool, save_roi2: bool, save_wave: bool) -> str:
+    """创建每视频的文件夹结构"""
+    if processing_mode == "video":
+        # 批量模式：使用视频名称
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        sanitized_name = _sanitize_video_name(video_name)
+        tmp_root = os.path.join(BASE_DIR, "tmp", sanitized_name)
+    else:
+        # 屏幕模式：使用基于会话的命名（原有行为）
+        session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tmp_root = os.path.join(BASE_DIR, "tmp", session_start)
+
+    # 创建子文件夹
+    roi1_dir = os.path.join(tmp_root, "roi1")
+    roi2_dir = os.path.join(tmp_root, "roi2")
+    wave_dir = os.path.join(tmp_root, "wave")
+
+    # 根据配置创建目录
+    if save_roi1 or save_roi2 or save_wave:
+        os.makedirs(tmp_root, exist_ok=True)
+    if save_roi1:
+        os.makedirs(roi1_dir, exist_ok=True)
+    if save_roi2:
+        os.makedirs(roi2_dir, exist_ok=True)
+    if save_wave:
+        os.makedirs(wave_dir, exist_ok=True)
+
+    return tmp_root
+
+
+def discover_video_files(video_path: str) -> List[str]:
+    """发现文件夹中的所有视频文件"""
+    if not os.path.exists(video_path):
+        raise ValueError(f"Video directory does not exist: {video_path}")
+
+    # 支持的视频文件扩展名
+    video_extensions = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv', '*.flv', '*.webm']
+
+    video_files = []
+    for ext in video_extensions:
+        # 搜索文件夹中的匹配文件
+        pattern = os.path.join(video_path, ext)
+        video_files.extend(glob.glob(pattern))
+        # 也搜索大写扩展名
+        pattern = os.path.join(video_path, ext.upper())
+        video_files.extend(glob.glob(pattern))
+
+    # 去重并排序
+    video_files = sorted(list(set(video_files)))
+
+    if not video_files:
+        raise ValueError(f"No video files found in directory: {video_path}")
+
+    return video_files
 
 
 def initialize_video_capture(video_path: str):
@@ -419,14 +548,40 @@ def run_daemon() -> None:
     # 检测处理模式
     processing_mode = config.get("processing_mode", "screen")
     video_cap = None
+    video_files = []  # 存储要处理的视频文件列表
+    current_video_index = 0  # 当前处理的视频索引
+
+    # 为屏幕模式初始化统计实例
+    if processing_mode == "screen":
+        statistics_manager.initialize_for_video(None, is_batch=False)
+        safe_statistics = statistics_manager.current_statistics
 
     if processing_mode == "video":
         video_config = config.get("video_processing", {})
         video_path = video_config.get("video_path", "")
         if not video_path:
             raise ValueError("Video mode enabled but no video_path specified in config")
-        video_cap = initialize_video_capture(video_path)
-        print(f"视频模式: {video_path}")
+
+        # 检查是单个文件还是文件夹
+        if os.path.isfile(video_path):
+            # 单个视频文件
+            video_files = [video_path]
+            print(f"视频模式: 单个视频文件 {video_path}")
+        elif os.path.isdir(video_path):
+            # 视频文件夹
+            video_files = discover_video_files(video_path)
+            print(f"视频模式: 文件夹 {video_path}")
+            print(f"发现 {len(video_files)} 个视频文件:")
+            for i, video_file in enumerate(video_files, 1):
+                print(f"  {i}. {os.path.basename(video_file)}")
+        else:
+            raise ValueError(f"Video path does not exist: {video_path}")
+
+        # 初始化第一个视频
+        if video_files:
+            # 为第一个视频初始化统计
+            statistics_manager.initialize_for_video(video_files[0], is_batch=True)
+            video_cap = initialize_video_capture(video_files[0])
 
     try:
         roi_default = config.get("roi_capture", {}).get("default_config", {})
@@ -478,21 +633,47 @@ def run_daemon() -> None:
         consecutive_below_threshold: int = 0
         last_waveform_time: float = 0.0
 
-        # Prepare per-session image save directories if enabled
-        session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tmp_root = os.path.join(BASE_DIR, "tmp", session_start)
-        roi1_dir = os.path.join(tmp_root, "roi1")
-        roi2_dir = os.path.join(tmp_root, "roi2")
-        wave_dir = os.path.join(tmp_root, "wave")
+        # Prepare per-video image save directories if enabled
+        if processing_mode == "video" and video_files:
+            # Video mode: Use first video for initial folder creation
+            current_stats = statistics_manager.current_statistics
+            if current_stats and current_stats.video_name:
+                tmp_root = _create_video_folders(
+                    video_files[0],
+                    current_stats.session_id,
+                    processing_mode,
+                    save_roi1,
+                    save_roi2,
+                    save_wave
+                )
+            else:
+                # Fallback for screen mode or if video stats not initialized
+                session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
+                tmp_root = os.path.join(BASE_DIR, "tmp", session_start)
+                if save_roi1 or save_roi2 or save_wave:
+                    os.makedirs(tmp_root, exist_ok=True)
+                if save_roi1:
+                    os.makedirs(os.path.join(tmp_root, "roi1"), exist_ok=True)
+                if save_roi2:
+                    os.makedirs(os.path.join(tmp_root, "roi2"), exist_ok=True)
+                if save_wave:
+                    os.makedirs(os.path.join(tmp_root, "wave"), exist_ok=True)
+        else:
+            # Screen mode: Use original session-based naming
+            session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
+            tmp_root = os.path.join(BASE_DIR, "tmp", session_start)
+            roi1_dir = os.path.join(tmp_root, "roi1")
+            roi2_dir = os.path.join(tmp_root, "roi2")
+            wave_dir = os.path.join(tmp_root, "wave")
 
-        if save_roi1 or save_roi2 or save_wave:
-            os.makedirs(tmp_root, exist_ok=True)
-        if save_roi1:
-            os.makedirs(roi1_dir, exist_ok=True)
-        if save_roi2:
-            os.makedirs(roi2_dir, exist_ok=True)
-        if save_wave:
-            os.makedirs(wave_dir, exist_ok=True)
+            if save_roi1 or save_roi2 or save_wave:
+                os.makedirs(tmp_root, exist_ok=True)
+            if save_roi1:
+                os.makedirs(roi1_dir, exist_ok=True)
+            if save_roi2:
+                os.makedirs(roi2_dir, exist_ok=True)
+            if save_wave:
+                os.makedirs(wave_dir, exist_ok=True)
 
         frame_index = 0
 
@@ -554,14 +735,72 @@ def run_daemon() -> None:
                     first_video_frame = False
                     screen = get_video_frame(video_cap, loop_enabled, frame_step=step)
                     if screen is None:
-                        total_time = time.time() - (loop_start - (frame_index * interval_seconds))
-                        actual_fps = frame_index / total_time if total_time > 0 else 0
-                        print(f"视频播放结束")
-                        print(f"[统计] 总处理时间: {total_time:.2f} 秒")
-                        print(f"[统计] 总处理帧数: {frame_index}")
-                        print(f"[统计] 实际帧率: {actual_fps:.2f} fps")
-                        print(f"[统计] 配置帧率: {roi_frame_rate:.2f} fps")
-                        break
+                        # 当前视频播放结束
+                        current_video_index += 1
+
+                        # 释放当前视频资源
+                        video_cap.release()
+
+                        if current_video_index < len(video_files):
+                            # 切换到下一个视频
+                            next_video_path = video_files[current_video_index]
+                            try:
+                                # 为此视频初始化新的统计
+                                current_stats = statistics_manager.initialize_for_video(
+                                    next_video_path,
+                                    is_batch=True
+                                )
+
+                                video_cap = initialize_video_capture(next_video_path)
+                                print(f"\n" + "="*50)
+                                print(f"开始处理下一个视频 ({current_video_index + 1}/{len(video_files)}):")
+                                print(f"文件名: {os.path.basename(next_video_path)}")
+                                print(f"统计会话: {current_stats.session_id}")
+
+                                # 重新计算新视频的帧率参数
+                                video_fps = _get_video_fps(video_cap)
+                                if video_fps > 0:
+                                    effective_frame_rate = min(roi_frame_rate, video_fps)
+                                    if effective_frame_rate > 0:
+                                        video_frame_step = max(1, int(round(video_fps / effective_frame_rate)))
+
+                                # 创建每视频文件夹结构
+                                tmp_root = _create_video_folders(
+                                    next_video_path,
+                                    current_stats.session_id,
+                                    processing_mode,
+                                    save_roi1,
+                                    save_roi2,
+                                    save_wave
+                                )
+
+                                print(f"[video] source_fps={video_fps:.2f} target_fps={effective_frame_rate:.2f} frame_step={video_frame_step}")
+                                print(f"[folders] tmp_root={tmp_root}")
+                                print("="*50)
+
+                                # 重置帧索引和首帧标志
+                                frame_index = 0
+                                first_video_frame = True
+
+                                # 继续处理下一个视频，不break
+                                continue
+                            except Exception as e:
+                                print(f"无法打开下一个视频 {next_video_path}: {e}")
+                                print("继续处理下一个视频...")
+                                continue
+                        else:
+                            # 所有视频都处理完毕
+                            total_time = time.time() - (loop_start - (frame_index * interval_seconds))
+                            actual_fps = frame_index / total_time if total_time > 0 else 0
+                            print(f"\n" + "="*50)
+                            print(f"所有视频处理完成！")
+                            print(f"[统计] 总处理时间: {total_time:.2f} 秒")
+                            print(f"[统计] 总处理视频数: {len(video_files)}")
+                            print(f"[统计] 总处理帧数: {frame_index}")
+                            print(f"[统计] 平均帧率: {actual_fps:.2f} fps")
+                            print(f"[统计] 配置帧率: {roi_frame_rate:.2f} fps")
+                            print("="*50)
+                            break
                     screen_width, screen_height = screen.size
                 else:
                     screen = ImageGrab.grab()
@@ -739,10 +978,12 @@ def run_daemon() -> None:
                         }
 
                     # Add detected peaks to statistics with deduplication
-                    safe_statistics.add_peaks_from_daemon(
-                        frame_index=frame_index,
-                        green_peaks=green_peaks,
-                        red_peaks=red_peaks,
+                    current_stats = statistics_manager.current_statistics
+                    if current_stats:
+                        current_stats.add_peaks_from_daemon(
+                            frame_index=frame_index,
+                            green_peaks=green_peaks,
+                            red_peaks=red_peaks,
                         curve=list(gray_buffer) if gray_buffer else [],
                         intersection=last_intersection_roi,
                         roi2_info=roi2_info,
@@ -880,32 +1121,41 @@ if __name__ == "__main__":
         run_daemon()
     except KeyboardInterrupt:
         # 程序结束时导出最终CSV文件（task要求）
-        print("\n正在导出最终CSV文件...")
+        print("\n数据处理完成，CSV文件已保存...")
         try:
-            export_path = safe_statistics.export_final_csv()
-            if export_path:
-                print(f"✅ 最终CSV文件已导出至: {export_path}")
+            # 获取当前统计文件路径
+            current_stats = statistics_manager.current_statistics
+            if current_stats:
+                export_path = current_stats.export_final_csv()
+                if export_path:
+                    print(f"✅ 当前视频CSV文件已保存至: {export_path}")
 
-                # 显示统计摘要
-                summary = safe_statistics.get_statistics_summary()
-                print(f"📊 统计摘要:")
-                print(f"   总波峰数: {summary.get('total_peaks', 0)}")
-                print(f"   绿色波峰: {summary.get('green_peaks', 0)}")
-                print(f"   红色波峰: {summary.get('red_peaks', 0)}")
-                print(f"   会话时长: {summary.get('session_duration', 'N/A')}")
-                print(f"   会话ID: {summary.get('session_id', 'N/A')}")
-            else:
-                print("ℹ️ 没有数据可导出")
+            # 显示所有视频的统计摘要
+            global_summary = statistics_manager.get_global_summary()
+            print(f"📊 批量处理统计摘要:")
+            print(f"   总处理视频数: {global_summary.get('total_videos_processed', 0)}")
+            print(f"   总波峰数: {global_summary.get('total_peaks', 0)}")
+            print(f"   绿色波峰: {global_summary.get('total_green_peaks', 0)}")
+            print(f"   红色波峰: {global_summary.get('total_red_peaks', 0)}")
+            print(f"   会话时长: {global_summary.get('session_duration', 'N/A')}")
+
+            # 显示每个视频的详细信息
+            videos_processed = global_summary.get('videos_processed', [])
+            if videos_processed:
+                print(f"   处理的视频: {', '.join(videos_processed)}")
+
         except Exception as e:
-            print(f"❌ 导出CSV文件时发生错误: {e}")
+            print(f"❌ 处理CSV文件时发生错误: {e}")
 
         print("守护进程已停止")
     except Exception as e:
         print(f"❌ 守护进程运行时发生错误: {e}")
-        # 即使出错也尝试导出数据
+        # 即使出错也尝试保存数据
         try:
-            export_path = safe_statistics.export_final_csv()
-            if export_path:
-                print(f"✅ 异常停止前数据已导出至: {export_path}")
+            current_stats = statistics_manager.current_statistics
+            if current_stats:
+                export_path = current_stats.export_final_csv()
+                if export_path:
+                    print(f"✅ 异常停止前数据已保存至: {export_path}")
         except Exception:
             pass
