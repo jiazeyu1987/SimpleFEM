@@ -8,6 +8,11 @@
     "save_wave": true,
     "only_delect": false
   },
+  "analysis_cache": {
+    "_comment": "Save per-frame analysis cache (JSONL) to export/ for later debugging.",
+    "enabled": true,
+    "flush_every": 50
+  },
   "video_processing": {
     "_comment": "processing_mode=video 时生效：从本地视频文件夹依次读取所有视频文件作为输入。video_path可以是单个视频文件或视频文件夹路径。",
     "video_path": "video",
@@ -113,7 +118,7 @@
   },
   "deduplication": {
     "_comment": "统计导出去重参数（safe_peak_statistics.py 使用）：避免短时间内重复记录相似波峰。",
-    "consecutive_frame_window": 25,
+    "consecutive_frame_window": 40,
     "_comment_consecutive_frame_window": "连续去重窗口：20帧内相同峰值的波峰只保留优先级最高的一个。",
     "consecutive_deduplication_enabled": true,
     "cross_color_deduplication_enabled": true,

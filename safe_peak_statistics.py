@@ -150,10 +150,10 @@ class SafePeakStatistics:
                             intersection: Optional[Tuple[int, int]] = None,
                             roi2_info: Optional[Dict[str, int]] = None,
                             gray_value: Optional[float] = None,
-                            difference_threshold: float = 1.1,
-                            pre_post_avg_frames: int = 5,
-                            threshold_used: Optional[float] = None,
-                            bg_mean: Optional[float] = None):
+                             difference_threshold: float = 1.1,
+                             pre_post_avg_frames: int = 5,
+                             threshold_used: Optional[float] = None,
+                             bg_mean: Optional[float] = None) -> List[Dict[str, Any]]:
         """
         从守护进程添加波峰数据
 
@@ -170,6 +170,7 @@ class SafePeakStatistics:
             threshold_used: 当次检测使用的阈值（固定阈值或自适应阈值）
             bg_mean: 当次检测时的背景均值（用于自适应阈值基线）
         """
+        results: List[Dict[str, Any]] = []
         try:
             timestamp = datetime.now()
 
@@ -185,19 +186,23 @@ class SafePeakStatistics:
 
                     # 第一层去重：基于前后帧平均值
                     if self._is_duplicate_peak(peak_data):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "duplicate_peak"})
                         continue
 
                     # 第二层去重：连续同色波峰去重
                     if self._is_consecutive_duplicate(peak_data, curve, start, end):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "consecutive_duplicate"})
                         continue
 
                     # 第三层去重：排除前后帧平均值为0的波峰
                     if self._is_invalid_peak_data(peak_data):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "invalid_peak_data"})
                         continue
 
                     # 三层去重都通过，才记录波峰
                     self._add_peak_to_memory(peak_data)
                     self._write_peak_to_csv(peak_data)
+                    results.append({**peak_data, "action": "added"})
                     self._add_log(f"添加绿色波峰: [{start},{end}], 最大值: {peak_data['peak_max_value']:.1f}")
 
                 # 添加红色波峰
@@ -211,25 +216,33 @@ class SafePeakStatistics:
 
                     # 第一层去重：基于前后帧平均值
                     if self._is_duplicate_peak(peak_data):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "duplicate_peak"})
                         continue
 
                     # 第二层去重：连续同色波峰去重
                     if self._is_consecutive_duplicate(peak_data, curve, start, end):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "consecutive_duplicate"})
                         continue
 
                     # 第三层去重：排除前后帧平均值为0的波峰
                     if self._is_invalid_peak_data(peak_data):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "invalid_peak_data"})
                         continue
 
                     # 三层去重都通过，才记录波峰
                     self._add_peak_to_memory(peak_data)
                     self._write_peak_to_csv(peak_data)
+                    results.append({**peak_data, "action": "added"})
                     self._add_log(f"添加红色波峰: [{start},{end}], 最大值: {peak_data['peak_max_value']:.1f}")
 
                 self.update_count += 1
 
+                return results
+
         except Exception as e:
             self._add_log(f"添加波峰数据失败: {e}", level="ERROR")
+
+        return []
 
     def _create_peak_data(self,
                          timestamp: datetime,

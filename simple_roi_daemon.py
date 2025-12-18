@@ -15,8 +15,10 @@ import json
 import logging
 import logging.handlers
 import os
+import platform
 import sys
 import time
+import uuid
 from collections import deque
 from datetime import datetime
 from typing import Any, Deque, Dict, List, Optional, Tuple
@@ -26,6 +28,129 @@ from PIL import Image, ImageGrab
 import cv2
 import matplotlib.pyplot as plt
 import glob
+
+
+def _json_default(obj: Any) -> Any:
+    """json.dumps fallback for numpy / datetime / other non-serializable values."""
+    try:
+        import numpy as _np  # local import to avoid hard dependency in helper
+
+        if isinstance(obj, (_np.integer, _np.floating)):
+            return obj.item()
+        if isinstance(obj, _np.ndarray):
+            return obj.tolist()
+    except Exception:
+        pass
+
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+
+    return str(obj)
+
+
+class RoiAnalysisCache:
+    """
+    Write a lightweight per-frame cache to `export/` for later analysis.
+
+    Format: JSONL (one JSON object per line), with `type` in {"meta","frame","session_end"}.
+    """
+
+    def __init__(self, export_dir: str, enabled: bool = True, flush_every: int = 50) -> None:
+        self.export_dir = export_dir
+        self.enabled = bool(enabled)
+        self.flush_every = max(1, int(flush_every))
+        self._fh: Optional[Any] = None
+        self._path: Optional[str] = None
+        self._run_id = uuid.uuid4().hex[:12]
+        self._write_count = 0
+        os.makedirs(self.export_dir, exist_ok=True)
+
+    @property
+    def path(self) -> Optional[str]:
+        return self._path
+
+    def start_session(
+        self,
+        session_id: str,
+        *,
+        processing_mode: str,
+        video_path: Optional[str],
+        config: Dict[str, Any],
+        extra_meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self.enabled:
+            return
+
+        self.close(reason="switch_session")
+
+        safe_session = str(session_id or "unknown")
+        filename = f"roi_analysis_cache_{safe_session}_{self._run_id}.jsonl"
+        self._path = os.path.join(self.export_dir, filename)
+        self._fh = open(self._path, "a", encoding="utf-8", newline="\n")
+        self._write_count = 0
+
+        meta: Dict[str, Any] = {
+            "type": "meta",
+            "cache_version": 1,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "session_id": safe_session,
+            "processing_mode": processing_mode,
+            "video_path": video_path,
+            "host": {
+                "platform": platform.platform(),
+                "python": sys.version.split()[0],
+            },
+            "config": config,
+        }
+        if extra_meta:
+            meta["extra"] = extra_meta
+
+        self._write_line(meta)
+        try:
+            self._fh.flush()
+        except Exception:
+            pass
+
+    def record_frame(self, payload: Dict[str, Any]) -> None:
+        if not self.enabled or self._fh is None:
+            return
+        payload = dict(payload)
+        payload.setdefault("type", "frame")
+        self._write_line(payload)
+
+    def close(self, reason: str = "normal") -> None:
+        if not self.enabled or self._fh is None:
+            self._fh = None
+            self._path = self._path  # keep last path for reference
+            return
+        try:
+            self._write_line(
+                {
+                    "type": "session_end",
+                    "ended_at": datetime.now().isoformat(timespec="seconds"),
+                    "reason": reason,
+                }
+            )
+            self._fh.flush()
+        except Exception:
+            pass
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+        self._fh = None
+
+    def _write_line(self, obj: Dict[str, Any]) -> None:
+        if self._fh is None:
+            return
+        line = json.dumps(obj, ensure_ascii=False, default=_json_default)
+        self._fh.write(line + "\n")
+        self._write_count += 1
+        if self._write_count % self.flush_every == 0:
+            try:
+                self._fh.flush()
+            except Exception:
+                pass
 
 
 
@@ -546,6 +671,16 @@ def run_daemon() -> None:
 
     config = load_fem_config()
 
+    # Optional: write a per-frame cache for later analysis / root-cause debugging
+    analysis_cache_conf = config.get("analysis_cache", {})
+    if not isinstance(analysis_cache_conf, dict):
+        analysis_cache_conf = {}
+    analysis_cache = RoiAnalysisCache(
+        os.path.join(BASE_DIR, "export"),
+        enabled=bool(analysis_cache_conf.get("enabled", True)),
+        flush_every=int(analysis_cache_conf.get("flush_every", 50)),
+    )
+
     # 检测处理模式
     processing_mode = config.get("processing_mode", "screen")
     video_cap = None
@@ -627,6 +762,7 @@ def run_daemon() -> None:
         bg_count: int = 0
         bg_mean: float = 0.0
         last_intersection_roi: Optional[Tuple[int, int]] = None
+        frames_since_protection_end: int = 0
 
         # Threshold protection state management
         threshold_protection_active: bool = False
@@ -723,6 +859,35 @@ def run_daemon() -> None:
         recovery_delay_frames = int(recovery_delay_seconds * effective_frame_rate)
         recovery_delay_frames = max(1, recovery_delay_frames)
 
+        # Start cache session (one file per SafePeakStatistics session/video)
+        try:
+            current_stats = statistics_manager.current_statistics
+            session_id = current_stats.session_id if current_stats else datetime.now().strftime("%Y%m%d_%H%M%S")
+            video_path_for_meta = None
+            if processing_mode == "video" and video_files:
+                if current_video_index < len(video_files):
+                    video_path_for_meta = video_files[current_video_index]
+                else:
+                    video_path_for_meta = video_files[0]
+            analysis_cache.start_session(
+                session_id,
+                processing_mode=processing_mode,
+                video_path=video_path_for_meta,
+                config=config,
+                extra_meta={
+                    "roi_frame_rate": roi_frame_rate,
+                    "effective_frame_rate": effective_frame_rate,
+                    "video_fps": video_fps,
+                    "video_frame_step": video_frame_step,
+                    "adaptive_window_frames": adaptive_window_frames,
+                    "gray_buffer_maxlen": 100,
+                },
+            )
+            if analysis_cache.path:
+                print(f"[cache] analysis_cache={analysis_cache.path}")
+        except Exception:
+            pass
+
         while True:
             loop_start = time.time()
             ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -795,6 +960,27 @@ def run_daemon() -> None:
                                 frame_index = 0
                                 first_video_frame = True
 
+                                # Start a new cache session for the new video/statistics session
+                                try:
+                                    analysis_cache.start_session(
+                                        current_stats.session_id,
+                                        processing_mode=processing_mode,
+                                        video_path=next_video_path,
+                                        config=config,
+                                        extra_meta={
+                                            "roi_frame_rate": roi_frame_rate,
+                                            "effective_frame_rate": effective_frame_rate,
+                                            "video_fps": video_fps,
+                                            "video_frame_step": video_frame_step,
+                                            "adaptive_window_frames": adaptive_window_frames,
+                                            "gray_buffer_maxlen": 100,
+                                        },
+                                    )
+                                    if analysis_cache.path:
+                                        print(f"[cache] analysis_cache={analysis_cache.path}")
+                                except Exception:
+                                    pass
+
                                 # 继续处理下一个视频，不break
                                 continue
                             except Exception as e:
@@ -818,6 +1004,15 @@ def run_daemon() -> None:
                 else:
                     screen = ImageGrab.grab()
                     screen_width, screen_height = screen.size
+
+                video_seconds: Optional[float] = None
+                if processing_mode == "video" and video_cap is not None:
+                    try:
+                        video_pos_msec = float(video_cap.get(cv2.CAP_PROP_POS_MSEC))
+                        if video_pos_msec >= 0:
+                            video_seconds = video_pos_msec / 1000.0
+                    except Exception:
+                        video_seconds = None
 
                 # 2. Get ROI1 region and crop
                 x1, y1, x2, y2 = adjust_roi1_to_screen(
@@ -867,7 +1062,11 @@ def run_daemon() -> None:
                 # 5. Run peak detection on current gray buffer
                 green_peaks: List[Tuple[int, int]] = []
                 red_peaks: List[Tuple[int, int]] = []
+                green_peaks_raw: List[Tuple[int, int]] = []
+                red_peaks_raw: List[Tuple[int, int]] = []
                 threshold_used = max(threshold, threshold_minimum)
+                recent_frames_count: Optional[int] = None
+                calculated_bg_mean: Optional[float] = None
 
                 if gray_buffer:
                     curve = list(gray_buffer)
@@ -985,6 +1184,7 @@ def run_daemon() -> None:
                 )
 
                 # Add peaks to statistics for Excel data collection (task requirement)
+                stats_write_results: List[Dict[str, Any]] = []
                 try:
                     # Prepare ROI2 information for statistics
                     roi2_info = None
@@ -998,7 +1198,7 @@ def run_daemon() -> None:
                     # Add detected peaks to statistics with deduplication
                     current_stats = statistics_manager.current_statistics
                     if current_stats:
-                        current_stats.add_peaks_from_daemon(
+                        stats_write_results = current_stats.add_peaks_from_daemon(
                             frame_index=frame_index,
                             green_peaks=green_peaks,
                             red_peaks=red_peaks,
@@ -1019,6 +1219,73 @@ def run_daemon() -> None:
                 # Decide whether to save images/wave for this frame
                 has_peak = (green_count > 0) or (red_count > 0)
                 should_save = (not only_delect) or has_peak
+
+                # Write a per-frame cache record for later Q&A / root cause analysis
+                try:
+                    buffer_len = len(gray_buffer)
+                    buffer_start_frame = max(0, frame_index - buffer_len + 1)
+
+                    def _peaks_to_abs(peaks: List[Tuple[int, int]]) -> List[Dict[str, int]]:
+                        out: List[Dict[str, int]] = []
+                        for s, e in peaks:
+                            out.append(
+                                {
+                                    "buffer_start": int(s),
+                                    "buffer_end": int(e),
+                                    "abs_start": int(buffer_start_frame + s),
+                                    "abs_end": int(buffer_start_frame + e),
+                                }
+                            )
+                        return out
+
+                    analysis_cache.record_frame(
+                        {
+                            "ts_wall": loop_start,
+                            "ts_local": ts,
+                            "frame_index": int(frame_index),
+                            "video_seconds": video_seconds,
+                            "screen_size": [int(screen_width), int(screen_height)],
+                            "roi1": {"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)},
+                            "intersection": {"current": intersection, "used": last_intersection_roi},
+                            "roi2_region": roi2_region,
+                            "roi2_gray": roi2_gray,
+                            "buffer": {
+                                "len": int(buffer_len),
+                                "start_frame_index": int(buffer_start_frame),
+                                "maxlen": 100,
+                            },
+                            "threshold": {
+                                "fixed": float(threshold),
+                                "minimum": float(threshold_minimum),
+                                "used": float(threshold_used),
+                                "adaptive_enabled": bool(adaptive_threshold_enabled),
+                                "adaptive_window_frames": int(adaptive_window_frames),
+                                "recent_frames_count": recent_frames_count,
+                                "calculated_bg_mean": calculated_bg_mean,
+                                "bg_mean": (float(bg_mean) if bg_count > 0 else None),
+                                "bg_count": int(bg_count),
+                                "protection_active": bool(threshold_protection_active),
+                                "consecutive_below_threshold": int(consecutive_below_threshold),
+                                "frames_since_protection_end": int(frames_since_protection_end),
+                            },
+                            "detect_params": {
+                                "margin_frames": int(margin_frames),
+                                "silence_frames": int(silence_frames),
+                                "difference_threshold": float(diff_threshold),
+                                "pre_post_avg_frames": int(pre_post_avg_frames),
+                                "min_region_length": int(min_region_length),
+                            },
+                            "peaks": {
+                                "green_raw": _peaks_to_abs(green_peaks_raw),
+                                "red_raw": _peaks_to_abs(red_peaks_raw),
+                                "green": _peaks_to_abs(green_peaks),
+                                "red": _peaks_to_abs(red_peaks),
+                            },
+                            "stats_write": stats_write_results,
+                        }
+                    )
+                except Exception:
+                    pass
 
             # Optionally save ROI1 image
                 if should_save and save_roi1:
@@ -1203,6 +1470,10 @@ def run_daemon() -> None:
             time.sleep(sleep_time)
 
     finally:
+        try:
+            analysis_cache.close(reason="shutdown")
+        except Exception:
+            pass
         # 释放视频资源
         if video_cap is not None:
             video_cap.release()
