@@ -349,15 +349,31 @@ class SafePeakStatistics:
         try:
             current_pre_avg = peak_data['pre_peak_avg']
             current_post_avg = peak_data['post_peak_avg']
+            current_frame_index = peak_data['frame_index']
 
             # 检查最近的5个波峰（task要求的窗口大小）
             for recent_peak in self.recent_peaks[-self.duplicate_check_window:]:
                 recent_pre_avg = recent_peak.get('pre_peak_avg', 0)
                 recent_post_avg = recent_peak.get('post_peak_avg', 0)
 
-                # 前后帧平均值都接近（容差0.5）则视为重复
-                if (abs(recent_pre_avg - current_pre_avg) <= 0.5 and
-                    abs(recent_post_avg - current_post_avg) <= 0.5):
+                # 增强的重复检测：考虑时间间隔和峰值高度
+                frame_diff = abs(current_frame_index - recent_peak.get('frame_index', 0))
+
+                # 前后帧平均值都接近（容差2.0）且时间间隔较小时才视为重复
+                pre_avg_diff = abs(recent_pre_avg - current_pre_avg)
+                post_avg_diff = abs(recent_post_avg - current_post_avg)
+
+                if (pre_avg_diff <= 2.0 and post_avg_diff <= 2.0):
+                    # 如果时间间隔超过200帧，不视为重复（不同时间段的相似信号）
+                    if frame_diff > 200:
+                        continue
+
+                    # 如果当前波峰峰值明显更高（>5%），不视为重复
+                    current_max = peak_data.get('peak_max_value', 0)
+                    recent_max = recent_peak.get('peak_max_value', 0)
+                    if current_max > recent_max * 1.05:  # 峰值高5%以上
+                        continue
+
                     return True
             return False
         except Exception as e:
