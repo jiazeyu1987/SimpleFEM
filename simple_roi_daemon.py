@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import glob
 
 
+
 def manage_threshold_protection(
     current_gray: float,
     current_threshold: float,
@@ -1035,7 +1036,18 @@ def run_daemon() -> None:
 
                 # Optionally save ROI2 image (align index with ROI1 saves)
                 if should_save and save_roi2 and roi2_image is not None:
-                    roi2_path = os.path.join(roi2_dir, f"roi2_{frame_index:06d}.png")
+                    # Calculate video time in seconds if in video mode
+                    video_time_str = ""
+                    if processing_mode == "video" and video_cap is not None:
+                        try:
+                            # Get current video position in milliseconds
+                            video_pos_msec = video_cap.get(cv2.CAP_PROP_POS_MSEC)
+                            video_seconds = video_pos_msec / 1000.0
+                            video_time_str = f"_{video_seconds:06.2f}s"
+                        except Exception:
+                            video_time_str = "_0000.00s"
+
+                    roi2_path = os.path.join(roi2_dir, f"roi2_{frame_index:06d}{video_time_str}.png")
                     try:
                         roi2_image.save(roi2_path)
                     except Exception:
@@ -1049,6 +1061,7 @@ def run_daemon() -> None:
                             f"wave_{frame_index:06d}.png",
                         )
 
+                        # Save wave plot (curve before detection, but annotated with detection result)
                         fig, ax = plt.subplots(figsize=(8, 3))
                         x = list(range(len(curve)))
                         ax.plot(x, curve, color="black", linewidth=1)
@@ -1093,6 +1106,60 @@ def run_daemon() -> None:
                             ys = curve[s : e + 1]
                             ax.plot(xs, ys, color="red", linewidth=2)
 
+                        # Add ROI2 frame information if available
+                        if roi2_dir and os.path.exists(roi2_dir):
+                            # Look for ROI2 files to display frame information
+                            roi2_files = []
+                            buffer_start = max(0, frame_index - len(curve) + 1)
+                            buffer_end = frame_index
+
+                            # Search for ROI2 files with the new naming pattern (frame_xxxxxx_XXXX.XXs.png)
+                            roi2_pattern = os.path.join(roi2_dir, "roi2_*.png")
+                            all_roi2_files = glob.glob(roi2_pattern)
+
+                            for actual_frame_num in range(buffer_start, buffer_end + 1):
+                                # Try to find file with new pattern first
+                                found_file = None
+                                for roi2_file in all_roi2_files:
+                                    basename = os.path.basename(roi2_file)
+                                    # Check if filename starts with the current frame number
+                                    if basename.startswith(f"roi2_{actual_frame_num:06d}_"):
+                                        found_file = roi2_file
+                                        break
+
+                                # Fallback to old pattern if new pattern not found
+                                if found_file is None:
+                                    old_path = os.path.join(roi2_dir, f"roi2_{actual_frame_num:06d}.png")
+                                    if os.path.exists(old_path):
+                                        found_file = old_path
+
+                                if found_file:
+                                    # Extract frame number and time from filename
+                                    basename = os.path.basename(found_file)
+                                    try:
+                                        if "_" in basename:
+                                            parts = basename.replace("roi2_", "").replace(".png", "").split("_")
+                                            frame_num = int(parts[0])
+                                            if len(parts) > 1 and parts[1].endswith("s"):
+                                                time_str = parts[1]
+                                                roi2_files.append(f"{frame_num}({time_str})")
+                                            else:
+                                                roi2_files.append(str(frame_num))
+                                        else:
+                                            frame_num = int(basename.replace("roi2_", "").replace(".png", ""))
+                                            roi2_files.append(str(frame_num))
+                                    except Exception:
+                                        roi2_files.append(str(actual_frame_num))
+
+                                    if len(roi2_files) >= 3:  # Limit to 3 examples
+                                        break
+
+                            if roi2_files:
+                                sample_text = "ROI2: " + ", ".join(roi2_files)
+                                ax.text(0.02, 0.98, sample_text, transform=ax.transAxes,
+                                       fontsize=8, verticalalignment='top',
+                                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
                         ax.set_xlabel("Frame index in buffer")
                         ax.set_ylabel("Gray value")
                         ax.set_title("ROI2 gray waveform with peaks")
@@ -1100,7 +1167,7 @@ def run_daemon() -> None:
                         ax.grid(True, linestyle="--", alpha=0.3)
                         ax.legend(loc="best", fontsize=8)
                         fig.tight_layout()
-                        fig.savefig(wave_path)
+                        fig.savefig(wave_path, dpi=150, bbox_inches='tight')
                         plt.close(fig)
                     except Exception:
                         # Ignore individual plotting/saving errors
