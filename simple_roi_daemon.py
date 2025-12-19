@@ -383,7 +383,7 @@ def _sanitize_video_name(video_name: str) -> str:
     return sanitized or f"video_{int(time.time())}"
 
 
-def _create_video_folders(video_path: str, session_id: str, processing_mode: str, save_roi1: bool, save_roi2: bool, save_wave: bool) -> str:
+def _create_video_folders(video_path: str, session_id: str, processing_mode: str, save_roi1: bool, save_roi2: bool, save_wave: bool, save_roi1_wave: bool = False) -> str:
     """创建每视频的文件夹结构"""
     if processing_mode == "video":
         # 批量模式：使用视频名称
@@ -399,9 +399,10 @@ def _create_video_folders(video_path: str, session_id: str, processing_mode: str
     roi1_dir = os.path.join(tmp_root, "roi1")
     roi2_dir = os.path.join(tmp_root, "roi2")
     wave_dir = os.path.join(tmp_root, "wave")
+    wave1_dir = os.path.join(tmp_root, "wave1")
 
     # 根据配置创建目录
-    if save_roi1 or save_roi2 or save_wave:
+    if save_roi1 or save_roi2 or save_wave or save_roi1_wave:
         os.makedirs(tmp_root, exist_ok=True)
     if save_roi1:
         os.makedirs(roi1_dir, exist_ok=True)
@@ -409,6 +410,8 @@ def _create_video_folders(video_path: str, session_id: str, processing_mode: str
         os.makedirs(roi2_dir, exist_ok=True)
     if save_wave:
         os.makedirs(wave_dir, exist_ok=True)
+    if save_roi1_wave:
+        os.makedirs(wave1_dir, exist_ok=True)
 
     return tmp_root
 
@@ -816,6 +819,7 @@ def run_daemon() -> None:
         save_roi1 = bool(data_processing.get("save_roi1", False))
         save_roi2 = bool(data_processing.get("save_roi2", False))
         save_wave = bool(data_processing.get("save_wave", False))
+        save_roi1_wave = bool(data_processing.get("save_roi1_wave", False))
         # only_delect == True: save ROI1/ROI2/wave only when peaks are detected
         only_delect = bool(data_processing.get("only_delect", False))
 
@@ -841,6 +845,29 @@ def run_daemon() -> None:
 
         min_region_length = int(peak_conf.get("min_region_length", 1))
 
+        # ROI1 configuration parameters (independent from ROI2)
+        roi1_peak_conf = config.get("roi1_peak_detection", {})
+        roi1_enabled = bool(roi1_peak_conf.get("enabled", False))
+        roi1_threshold = float(roi1_peak_conf.get("threshold", 120.0))
+        roi1_threshold_minimum = float(roi1_peak_conf.get("threshold_minimum", 110.0))
+        roi1_margin_frames = int(roi1_peak_conf.get("margin_frames", 5))
+        roi1_silence_frames = int(roi1_peak_conf.get("silence_frames", 5))
+        roi1_pre_post_avg_frames = int(roi1_peak_conf.get("pre_post_avg_frames", 5))
+        roi1_difference_threshold = float(roi1_peak_conf.get("difference_threshold", 2.0))
+        roi1_min_region_length = int(roi1_peak_conf.get("min_region_length", 5))
+
+        # ROI1 adaptive threshold parameters
+        roi1_adaptive_threshold_enabled = bool(roi1_peak_conf.get("adaptive_threshold_enabled", True))
+        roi1_threshold_over_mean_ratio = float(roi1_peak_conf.get("threshold_over_mean_ratio", 0.08))
+        roi1_adaptive_window_seconds = float(roi1_peak_conf.get("adaptive_window_seconds", 3.0))
+
+        # ROI1 threshold protection parameters
+        roi1_protection_conf = roi1_peak_conf.get("threshold_protection", {})
+        roi1_protection_enabled = bool(roi1_protection_conf.get("enabled", True))
+        roi1_recovery_delay_seconds = float(roi1_protection_conf.get("recovery_delay_seconds", 1.0))
+        roi1_stability_frames = int(roi1_protection_conf.get("stability_frames", 5))
+        roi1_waveform_trigger_enabled = bool(roi1_protection_conf.get("waveform_trigger_enabled", True))
+
         logger = setup_peak_logger()
         # Store only the latest 100 gray values for waveform / peak detection
         gray_buffer: Deque[float] = deque(maxlen=100)
@@ -858,6 +885,15 @@ def run_daemon() -> None:
         consecutive_below_threshold: int = 0
         last_waveform_time: float = 0.0
 
+        # ROI1 independent buffer and state (parallel to ROI2)
+        roi1_gray_buffer: Deque[float] = deque(maxlen=100)
+        roi1_bg_count: int = 0
+        roi1_bg_mean: float = 0.0
+        roi1_threshold_protection_active: bool = False
+        roi1_protection_end_time: float = 0.0
+        roi1_consecutive_below_threshold: int = 0
+        roi1_last_waveform_time: float = 0.0
+
         # Prepare per-video image save directories if enabled
         if processing_mode == "video" and video_files:
             # Video mode: Use first video for initial folder creation
@@ -869,12 +905,14 @@ def run_daemon() -> None:
                     processing_mode,
                     save_roi1,
                     save_roi2,
-                    save_wave
+                    save_wave,
+                    save_roi1_wave
                 )
                 # 关键修复：更新ROI保存路径变量
                 roi1_dir = os.path.join(tmp_root, "roi1")
                 roi2_dir = os.path.join(tmp_root, "roi2")
                 wave_dir = os.path.join(tmp_root, "wave")
+                wave1_dir = os.path.join(tmp_root, "wave1")
             else:
                 # Fallback for screen mode or if video stats not initialized
                 session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1057,13 +1095,15 @@ def run_daemon() -> None:
                                     processing_mode,
                                     save_roi1,
                                     save_roi2,
-                                    save_wave
+                                    save_wave,
+                                    save_roi1_wave
                                 )
 
                                 # 关键修复：更新ROI保存路径变量
                                 roi1_dir = os.path.join(tmp_root, "roi1")
                                 roi2_dir = os.path.join(tmp_root, "roi2")
                                 wave_dir = os.path.join(tmp_root, "wave")
+                                wave1_dir = os.path.join(tmp_root, "wave1")
 
                                 print(f"[video] source_fps={video_fps:.2f} target_fps={effective_frame_rate:.2f} frame_step={video_frame_step}")
                                 print(f"[folders] tmp_root={tmp_root}")
@@ -1187,6 +1227,12 @@ def run_daemon() -> None:
                     roi2_gray = compute_average_gray(roi2_image)
                     gray_buffer.append(roi2_gray)
 
+                    # ROI1 gray value calculation (independent from ROI2)
+                    roi1_gray: Optional[float] = None
+                    if roi1_enabled:
+                        roi1_gray = compute_average_gray(roi1_image)
+                        roi1_gray_buffer.append(roi1_gray)
+
                 # 5. Run peak detection on current gray buffer
                 green_peaks: List[Tuple[int, int]] = []
                 red_peaks: List[Tuple[int, int]] = []
@@ -1299,7 +1345,42 @@ def run_daemon() -> None:
                             threshold_minimum=threshold_minimum,
                         )
 
-      
+  
+                # ROI1 adaptive threshold calculation (independent from ROI2)
+                roi1_threshold_used = max(roi1_threshold, roi1_threshold_minimum)
+                roi1_curve = list(roi1_gray_buffer) if roi1_gray_buffer else []
+                if roi1_enabled and roi1_gray_buffer:
+                    roi1_adaptive_window_frames = int(roi1_adaptive_window_seconds * effective_frame_rate)
+                    roi1_adaptive_window_frames = max(1, min(roi1_adaptive_window_frames, 100))
+
+                    if (roi1_adaptive_threshold_enabled and
+                        len(roi1_gray_buffer) >= roi1_adaptive_window_frames):
+
+                        # Calculate ROI1 recent mean
+                        roi1_recent_frames_count = min(len(roi1_gray_buffer), roi1_adaptive_window_frames)
+                        roi1_recent_frames = list(roi1_gray_buffer)[-roi1_recent_frames_count:]
+                        roi1_calculated_bg_mean = sum(roi1_recent_frames) / len(roi1_recent_frames)
+
+                        # Check ROI1 threshold protection status
+                        current_time = time.time()
+                        if roi1_threshold_protection_active:
+                            # Manage ROI1 threshold protection with current gray value
+                            # For now, use last known background mean during protection
+                            if roi1_bg_mean > 0:
+                                roi1_threshold_used = roi1_bg_mean * (1.0 + roi1_threshold_over_mean_ratio)
+                                roi1_threshold_used = max(roi1_threshold_used, roi1_threshold_minimum)
+                        else:
+                            # Update ROI1 background mean if current value is below threshold
+                            if roi1_gray < roi1_threshold_used:
+                                roi1_bg_count += 1
+                                # Incremental mean update: new_mean = old_mean + (new_value - old_mean) / count
+                                roi1_bg_mean = roi1_bg_mean + (roi1_gray - roi1_bg_mean) / roi1_bg_count
+
+                            # Calculate ROI1 adaptive threshold if we have enough background samples
+                            if roi1_adaptive_threshold_enabled and roi1_bg_mean > 0:
+                                roi1_threshold_used = roi1_bg_mean * (1.0 + roi1_threshold_over_mean_ratio)
+                                roi1_threshold_used = max(roi1_threshold_used, roi1_threshold_minimum)
+
                 green_count = len(green_peaks)
                 red_count = len(red_peaks)
                 last_green = green_peaks[-1] if green_peaks else None
@@ -1347,6 +1428,9 @@ def run_daemon() -> None:
                 # Decide whether to save images/wave for this frame
                 has_peak = (green_count > 0) or (red_count > 0)
                 should_save = (not only_delect) or has_peak
+
+                # For ROI1, save waveforms when data is available (independent of ROI2 peaks)
+                roi1_should_save = (not only_delect) or (len(roi1_gray_buffer) > 0)
 
                 # Write a per-frame cache record for later Q&A / root cause analysis
                 try:
@@ -1566,6 +1650,76 @@ def run_daemon() -> None:
                         plt.close(fig)
                     except Exception:
                         # Ignore individual plotting/saving errors
+                        pass
+
+                # ROI1 waveform visualization (if enabled)
+                roi1_green_peaks: List[Tuple[int, int]] = []
+                roi1_red_peaks: List[Tuple[int, int]] = []
+                # Note: ROI1 peak detection will be implemented in a future phase
+                # For now, we just visualize the ROI1 gray values without peak detection
+
+                # Save ROI1 wave plot
+                if roi1_should_save and save_roi1_wave and roi1_enabled and roi1_curve:
+                    try:
+                        roi1_wave_path = os.path.join(
+                            wave1_dir,
+                            f"roi1_wave_{frame_index:06d}.png",
+                        )
+
+                        # Create ROI1 waveform plot
+                        fig, ax = plt.subplots(figsize=(8, 3))
+                        x = list(range(len(roi1_curve)))
+                        ax.plot(x, roi1_curve, color="darkblue", linewidth=1, label="ROI1")
+
+                        # Draw ROI1 background mean
+                        if roi1_bg_count > 0:
+                            ax.axhline(
+                                roi1_bg_mean,
+                                color="blue",
+                                linestyle="--",
+                                linewidth=1,
+                                label="bg_mean",
+                            )
+
+                        # Draw ROI1 threshold
+                        roi1_threshold_color = "red" if roi1_threshold_protection_active else "orange"
+                        roi1_threshold_style = "--" if roi1_threshold_protection_active else "-"
+                        ax.axhline(
+                            roi1_threshold_used,
+                            color=roi1_threshold_color,
+                            linestyle=roi1_threshold_style,
+                            linewidth=1.5,
+                            label=f"threshold ({roi1_threshold_used:.1f}{'[PROTECTED]' if roi1_threshold_protection_active else ''})",
+                        )
+
+                        # Highlight ROI1 peaks regions (placeholder for future peak detection)
+                        for start, end in roi1_green_peaks:
+                            s = max(0, start - 1)
+                            e = min(len(roi1_curve) - 1, end + 1)
+                            xs = list(range(s, e + 1))
+                            ys = roi1_curve[s : e + 1]
+                            ax.plot(xs, ys, color="green", linewidth=2)
+
+                        for start, end in roi1_red_peaks:
+                            s = max(0, start - 1)
+                            e = min(len(roi1_curve) - 1, end + 1)
+                            xs = list(range(s, e + 1))
+                            ys = roi1_curve[s : e + 1]
+                            ax.plot(xs, ys, color="red", linewidth=2)
+
+                        
+                        # Set plot title and labels
+                        ax.set_title(f"ROI1 Waveform - Frame {frame_index} (len={len(roi1_curve)})")
+                        ax.set_xlabel("Frame Index (relative)")
+                        ax.set_ylabel("Gray Value (0-255)")
+                        ax.legend(loc='upper right', fontsize=8)
+                        ax.grid(True, alpha=0.3)
+
+                        fig.tight_layout()
+                        fig.savefig(roi1_wave_path, dpi=150, bbox_inches='tight')
+                        plt.close(fig)
+                    except Exception:
+                        # Ignore ROI1 plotting/saving errors
                         pass
 
             # Build log line; when only_delect is True, only log frames with peaks

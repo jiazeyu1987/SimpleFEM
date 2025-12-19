@@ -6,6 +6,7 @@
     "save_roi1": true,
     "save_roi2": true,
     "save_wave": true,
+    "save_roi1_wave": true,
     "only_delect": false
   },
   "analysis_cache": {
@@ -102,6 +103,44 @@
       "peak_matching_threshold": 0.8,
       "max_tracking_age": 15
     }
+  },
+  "roi1_peak_detection": {
+    "_comment": "ROI1波峰检测：独立于ROI2的波形分析系统，基于ROI1整个区域的平均灰度值。",
+    "enabled": true,
+    "_comment_enabled": "是否启用ROI1波峰检测功能",
+    "threshold": 120.0,
+    "_comment_threshold": "ROI1固定阈值：考虑到ROI1区域更大、更复杂，通常设置比ROI2更高",
+    "threshold_minimum": 110.0,
+    "_comment_threshold_minimum": "ROI1阈值下限：确保在低对比度情况下仍能检测",
+    "threshold_over_mean_ratio": 0.08,
+    "_comment_threshold_over_mean_ratio": "ROI1自适应阈值上浮比例：较小比例，因为ROI1变化通常更稳定",
+    "margin_frames": 5,
+    "_comment_margin_frames": "ROI1峰间最小间隔：防止过度敏感的波峰检测",
+    "silence_frames": 5,
+    "_comment_silence_frames": "ROI1干净区间长度要求",
+    "pre_post_avg_frames": 5,
+    "_comment_pre_post_avg_frames": "ROI1绿/红判定窗口帧数",
+    "adaptive_threshold_enabled": true,
+    "_comment_adaptive_threshold_enabled": "ROI1启用自适应阈值",
+    "adaptive_window_seconds": 3.0,
+    "_comment_adaptive_window_seconds": "ROI1自适应阈值计算时间窗口",
+    "threshold_protection": {
+      "_comment": "ROI1阈值保护机制：防止ROI1波峰污染背景均值计算",
+      "enabled": true,
+      "_comment_enabled": "是否启用ROI1阈值保护机制",
+      "recovery_delay_seconds": 1.0,
+      "_comment_recovery_delay_seconds": "ROI1波峰结束后恢复阈值计算的延迟时间",
+      "stability_frames": 5,
+      "_comment_stability_frames": "ROI1恢复阈值计算前需要的稳定帧数",
+      "waveform_trigger_enabled": true,
+      "_comment_waveform_trigger_enabled": "ROI1是否在波形达到阈值时立即触发保护"
+    },
+    "difference_threshold": 2.0,
+    "_comment_difference_threshold": "ROI1绿/红判定阈值：通常ROI1需要更高的阈值来确保检测质量",
+    "min_region_length": 5,
+    "_comment_min_region_length": "ROI1最小波峰宽度",
+    "use_improved_algorithm": false,
+    "_comment_use_improved_algorithm": "ROI1是否使用改进的波峰检测算法"
   },
   "startup_cleanup": {
     "_comment": "程序启动时的清理功能配置：控制是否自动删除历史数据文件夹。",
