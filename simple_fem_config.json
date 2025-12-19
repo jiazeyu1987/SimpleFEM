@@ -128,5 +128,21 @@
       "red": 1,
       "_comment": "颜色优先级：数值越大优先级越高。当相同时刻有相同峰值的波峰时，保留优先级高的。"
     }
+  },
+  "roi2_anti_jitter": {
+    "_comment": "ROI2防抖动机制参数配置 - 阈值式防抖动",
+    "enabled": true,
+    "algorithm": "threshold",
+    "_comment_algorithm": "滤波算法: 'ema'(平滑) 或 'threshold'(阈值式，小于阈值完全不动)",
+    "movement_threshold": 20.0,
+    "_comment_movement_threshold": "阈值式防抖动阈值(像素)。小于此值ROI2完全不动，超过此值才更新位置",
+    "initialization_frames": 3,
+    "_comment_initialization_frames": "初始化帧数。前N帧收集初始稳定位置",
+    "ema": {
+      "alpha": 0.25,
+      "_comment_alpha": "EMA平滑因子(仅在algorithm='ema'时使用)"
+    },
+    "stability_threshold": 8.0,
+    "_comment_stability_threshold": "稳定阈值(仅在algorithm='ema'时使用)"
   }
 }

@@ -271,7 +271,7 @@ def _setup_import_paths() -> None:
 _setup_import_paths()
 
 from peak_detection import detect_peaks  # type: ignore  # noqa: E402
-from green_detector import detect_green_intersection  # type: ignore  # noqa: E402
+from green_detector import detect_green_intersection, IntersectionFilter  # type: ignore  # noqa: E402
 from safe_peak_statistics import SafePeakStatistics  # type: ignore  # noqa: E402
 
 
@@ -671,6 +671,58 @@ def run_daemon() -> None:
 
     config = load_fem_config()
 
+    # Initialize anti-jitter filter if enabled
+    anti_jitter_config = config.get("roi2_anti_jitter", {})
+    intersection_filter = None
+    if anti_jitter_config.get("enabled", False):
+        # 参数验证和标准化
+        try:
+            algorithm = anti_jitter_config.get("algorithm", "ema")
+            movement_threshold = float(anti_jitter_config.get("movement_threshold", 20.0))
+            initialization_frames = int(anti_jitter_config.get("initialization_frames", 3))
+
+            if algorithm == "threshold":
+                # 阈值式防抖动
+                from threshold_based_anti_jitter import ThresholdIntersectionFilter
+                intersection_filter = ThresholdIntersectionFilter(movement_threshold, initialization_frames)
+                print(f"ROI2阈值式防抖动已启用:")
+                print(f"  - algorithm: threshold (阈值式)")
+                print(f"  - movement_threshold: {movement_threshold}px (小于此值ROI2完全不动)")
+                print(f"  - initialization_frames: {initialization_frames} (前N帧初始化稳定位置)")
+                print(f"  - 策略: 小于{movement_threshold}px变化时ROI2完全静止，超过才更新")
+            else:
+                # EMA平滑式防抖动
+                ema_config = anti_jitter_config.get("ema", {})
+                alpha = float(ema_config.get("alpha", 0.25))
+                stability_threshold = float(anti_jitter_config.get("stability_threshold", 8.0))
+
+                # 参数范围验证
+                if not (0.05 <= alpha <= 0.95):
+                    print(f"Warning: alpha={alpha} 超出推荐范围[0.05, 0.95]，将自动调整")
+                if movement_threshold < 1.0:
+                    print(f"Warning: movement_threshold={movement_threshold} 过小，建议设置为1.0以上")
+                if stability_threshold < 1.0:
+                    print(f"Warning: stability_threshold={stability_threshold} 过小，建议设置为1.0以上")
+                if not (stability_threshold < movement_threshold):
+                    print(f"Warning: stability_threshold({stability_threshold}) 应该小于 movement_threshold({movement_threshold})")
+                if initialization_frames < 1 or initialization_frames > 20:
+                    print(f"Warning: initialization_frames={initialization_frames} 可能不合适，推荐范围[1, 20]")
+
+                intersection_filter = IntersectionFilter(alpha, movement_threshold, initialization_frames, stability_threshold)
+                print(f"ROI2平滑式防抖动已启用:")
+                print(f"  - algorithm: ema (指数移动平均平滑)")
+                print(f"  - alpha (平滑因子): {alpha} (值越小越平滑)")
+                print(f"  - movement_threshold (运动阈值): {movement_threshold}px (大于此值直接通过)")
+                print(f"  - stability_threshold (稳定阈值): {stability_threshold}px (小于此值强力平滑)")
+                print(f"  - initialization_frames (初始化帧数): {initialization_frames}")
+
+        except (ValueError, TypeError) as e:
+            print(f"Error: 防抖动配置参数无效: {e}")
+            print("使用默认参数启用EMA防抖动")
+            intersection_filter = IntersectionFilter()  # 使用默认参数
+    else:
+        print("ROI2防抖动已禁用")
+
     # Optional: write a per-frame cache for later analysis / root-cause debugging
     analysis_cache_conf = config.get("analysis_cache", {})
     if not isinstance(analysis_cache_conf, dict):
@@ -921,6 +973,16 @@ def run_daemon() -> None:
                                     is_batch=True
                                 )
 
+                                # 重置防抖动滤波器状态（用于新视频）
+                                if intersection_filter:
+                                    # 保存当前调试信息
+                                    old_debug_info = intersection_filter.get_debug_info()
+                                    intersection_filter.reset()
+                                    print(f"已重置ROI2防抖动滤波器，切换到新视频: {os.path.basename(next_video_path)}")
+                                    print(f"上一个视频的防抖动统计: 处理{old_debug_info['frame_count']}帧, "
+                                          f"大运动{old_debug_info['large_movement_count']}次, "
+                                          f"边界限制{old_debug_info['boundary_clamp_count']}次")
+
                                 video_cap = initialize_video_capture(next_video_path)
                                 print(f"\n" + "="*50)
                                 print(f"开始处理下一个视频 ({current_video_index + 1}/{len(video_files)}):")
@@ -1028,10 +1090,22 @@ def run_daemon() -> None:
                     cv2.COLOR_RGB2BGR,
                 )
                 try:
-                    intersection = detect_green_intersection(roi_cv_image)
-                except Exception:
+                    intersection = detect_green_intersection(
+                        roi_cv_image,
+                        anti_jitter_config,
+                        intersection_filter
+                    )
+                except Exception as e:
                     # Keep daemon running even if detection fails on this frame
+                    print(f"Warning: Green intersection detection failed: {e}")
                     intersection = None
+                    # 如果检测失败，尝试重置防抖动滤波器
+                    if intersection_filter:
+                        try:
+                            intersection_filter.reset()
+                            intersection_filter.set_image_bounds(roi1_width, roi1_height)
+                        except:
+                            pass
 
                 if intersection is not None:
                     last_intersection_roi = intersection
@@ -1478,6 +1552,20 @@ def run_daemon() -> None:
         if video_cap is not None:
             video_cap.release()
             print("视频资源已释放")
+
+        # 输出防抖动滤波器最终统计信息
+        if intersection_filter:
+            try:
+                debug_info = intersection_filter.get_debug_info()
+                print(f"\n防抖动滤波器最终统计:")
+                print(f"  总处理帧数: {debug_info['frame_count']}")
+                print(f"  大运动事件: {debug_info['large_movement_count']}次")
+                print(f"  边界限制事件: {debug_info['boundary_clamp_count']}次")
+                print(f"  最终参数: alpha={debug_info['parameters']['alpha']}, "
+                      f"threshold={debug_info['parameters']['movement_threshold']}px, "
+                      f"init_frames={debug_info['parameters']['initialization_frames']}")
+            except Exception as e:
+                print(f"获取防抖动统计信息失败: {e}")
 
 
 if __name__ == "__main__":
