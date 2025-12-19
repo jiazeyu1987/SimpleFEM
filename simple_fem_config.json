@@ -42,7 +42,7 @@
   },
   "peak_detection": {
     "_comment": "波峰检测：先用阈值识别连续高位区间（波峰），再用 pre/post 均值差判定绿/红；支持自适应阈值（基于背景均值）。",
-    "threshold": 110.0,
+    "threshold": 40.0,
     "_comment_threshold": "固定阈值：自适应阈值未启用或历史样本不足时，使用该阈值判为高位。",
     "threshold_minimum": 100.0,
     "threshold_over_mean_ratio": 0.1,
@@ -108,9 +108,9 @@
     "_comment": "ROI1波峰检测：独立于ROI2的波形分析系统，基于ROI1整个区域的平均灰度值。",
     "enabled": true,
     "_comment_enabled": "是否启用ROI1波峰检测功能",
-    "threshold": 120.0,
+    "threshold": 50.0,
     "_comment_threshold": "ROI1固定阈值：考虑到ROI1区域更大、更复杂，通常设置比ROI2更高",
-    "threshold_minimum": 110.0,
+    "threshold_minimum": 20.0,
     "_comment_threshold_minimum": "ROI1阈值下限：确保在低对比度情况下仍能检测",
     "threshold_over_mean_ratio": 0.08,
     "_comment_threshold_over_mean_ratio": "ROI1自适应阈值上浮比例：较小比例，因为ROI1变化通常更稳定",
@@ -167,6 +167,32 @@
       "red": 1,
       "_comment": "颜色优先级：数值越大优先级越高。当相同时刻有相同峰值的波峰时，保留优先级高的。"
     }
+  },
+  "hybrid_detection": {
+    "_comment": "混合检测配置：ROI1检测波峰，ROI2判定颜色",
+    "enabled": true,
+    "detection_strategy": "roi1_peaks_roi2_color",
+    "_comment_detection_strategy": "检测策略：roi1_peaks_roi2_color (ROI1波峰+ROI2颜色)",
+    "fusion_strategy": "roi2_priority",
+    "_comment_fusion_strategy": "融合策略：roi2_priority (优先ROI2颜色判定)",
+    "roi2_color_frames": {
+      "_comment": "ROI2颜色判定使用的前后帧窗口",
+      "pre_peak": 5,
+      "_comment_pre_peak": "ROI2波峰前取平均值的帧数",
+      "post_peak": 10,
+      "_comment_post_peak": "ROI2波峰后取平均值的帧数"
+    },
+    "roi1_peak_width_range": [5, 100],
+    "_comment_roi1_peak_width_range": "ROI1波峰宽度范围(帧数) [最小, 最大]",
+    "data_quality": {
+      "_comment": "数据质量检查参数",
+      "minimum_roi2_frames": 15,
+      "_comment_minimum_roi2_frames": "ROI2最少有效帧数要求",
+      "roi2_minimum_variance": 0.5,
+      "_comment_roi2_minimum_variance": "ROI2数据最小方差要求"
+    },
+    "fallback_enabled": true,
+    "_comment_fallback_enabled": "是否启用ROI2数据不足时的回退机制"
   },
   "roi2_anti_jitter": {
     "_comment": "ROI2防抖动机制参数配置 - 阈值式防抖动",

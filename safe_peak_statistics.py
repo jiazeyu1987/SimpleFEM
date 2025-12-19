@@ -38,6 +38,11 @@ class SafePeakStatistics:
         self.recent_peaks: List[Dict[str, Any]] = []
         self.max_recent_peaks = 5  # 去重检查窗口
         self.stats_data: List[Dict[str, Any]] = []
+
+        # 混合检测相关数据结构
+        self.hybrid_stats_data: List[Dict[str, Any]] = []
+        self.hybrid_enabled: bool = False
+
         self.start_time = datetime.now()
         self.video_name = video_name
         self.is_batch_mode = is_batch_mode
@@ -153,29 +158,80 @@ class SafePeakStatistics:
                              difference_threshold: float = 1.1,
                              pre_post_avg_frames: int = 5,
                              threshold_used: Optional[float] = None,
-                             bg_mean: Optional[float] = None) -> List[Dict[str, Any]]:
+                             bg_mean: Optional[float] = None,
+                             hybrid_enabled: bool = False,
+                             hybrid_peaks: List[Dict] = None,
+                             roi1_curve: List[float] = None,
+                             roi1_threshold_used: float = 0.0) -> List[Dict[str, Any]]:
         """
-        从守护进程添加波峰数据
+        从守护进程添加波峰数据，支持混合检测模式
 
         Args:
             frame_index: 帧索引
-            green_peaks: 绿色波峰列表 [(start_frame, end_frame), ...]
-            red_peaks: 红色波峰列表 [(start_frame, end_frame), ...]
-            curve: 当前灰度曲线数据
+            green_peaks: 绿色波峰列表 [(start_frame, end_frame), ...] - 传统模式使用
+            red_peaks: 红色波峰列表 [(start_frame, end_frame), ...] - 传统模式使用
+            curve: ROI2当前灰度曲线数据
             intersection: ROI1中的绿线交点坐标 (x, y)
             roi2_info: ROI2区域信息 {'x1':, 'y1':, 'x2':, 'y2':}
             gray_value: ROI2的平均灰度值
             difference_threshold: 用于分类的差值阈值
             pre_post_avg_frames: 前后平均灰度的帧数（默认5）
-            threshold_used: 当次检测使用的阈值（固定阈值或自适应阈值）
-            bg_mean: 当次检测时的背景均值（用于自适应阈值基线）
+            threshold_used: ROI2当次检测使用的阈值（固定阈值或自适应阈值）
+            bg_mean: ROI2当次检测时的背景均值（用于自适应阈值基线）
+            hybrid_enabled: 是否启用混合检测模式
+            hybrid_peaks: 混合检测结果列表 - 混合模式优先使用
+            roi1_curve: ROI1灰度曲线数据
+            roi1_threshold_used: ROI1检测使用的阈值
+
+        Returns:
+            List[Dict[str, Any]]: 添加的波峰统计数据列表
         """
         results: List[Dict[str, Any]] = []
         try:
             timestamp = datetime.now()
 
             with self.lock:
-                # 添加绿色波峰
+                # 混合检测模式优先处理
+                if hybrid_enabled and hybrid_peaks:
+                    print(f"[混合检测统计] 处理{len(hybrid_peaks)}个混合检测结果")
+
+                    for hybrid_peak in hybrid_peaks:
+                        peak_start, peak_end = hybrid_peak['peak_interval']
+
+                        # 创建混合检测波峰数据
+                        hybrid_peak_data = self._create_hybrid_peak_data(
+                            timestamp, peak_start, peak_end, hybrid_peak,
+                            frame_index, curve, roi1_curve, intersection, roi2_info,
+                            gray_value, difference_threshold, pre_post_avg_frames,
+                            threshold_used, roi1_threshold_used, bg_mean
+                        )
+
+                        # 应用三层去重逻辑
+                        if self._is_duplicate_peak(hybrid_peak_data):
+                            results.append({**hybrid_peak_data, "action": "skipped", "skip_reason": "duplicate_peak"})
+                            continue
+
+                        if self._is_consecutive_duplicate(hybrid_peak_data, curve, peak_start, peak_end):
+                            results.append({**hybrid_peak_data, "action": "skipped", "skip_reason": "consecutive_duplicate"})
+                            continue
+
+                        if self._is_invalid_peak_data(hybrid_peak_data):
+                            results.append({**hybrid_peak_data, "action": "skipped", "skip_reason": "invalid_peak_data"})
+                            continue
+
+                        # 混合检测数据通过去重验证，记录到统计系统
+                        self._add_peak_to_memory(hybrid_peak_data)
+                        self._write_peak_to_csv(hybrid_peak_data)
+                        results.append({**hybrid_peak_data, "action": "added"})
+
+                        color = hybrid_peak.get('color', 'unknown')
+                        method = hybrid_peak.get('method', 'unknown')
+                        confidence = hybrid_peak.get('confidence', 0.0)
+                        self._add_log(f"添加混合检测{color}色波峰: [{peak_start},{peak_end}], 方法:{method}, 置信度:{confidence:.2f}")
+
+                    return results
+
+                # 传统模式：添加绿色波峰
                 for i, (start, end) in enumerate(green_peaks):
                     peak_data = self._create_peak_data(
                         timestamp, frame_index, "green", start, end,
@@ -295,6 +351,123 @@ class SafePeakStatistics:
             'bg_mean': round(float(bg_mean), 3) if bg_mean is not None else 0.0,
             'peak_max_value': round(peak_max_value, 2)  # 新增：波峰最大值
         }
+
+    def _create_hybrid_peak_data(self,
+                                timestamp: datetime,
+                                start_frame: int,
+                                end_frame: int,
+                                hybrid_peak: Dict[str, Any],
+                                frame_index: int,
+                                roi2_curve: List[float],
+                                roi1_curve: List[float] = None,
+                                intersection: Optional[Tuple[int, int]] = None,
+                                roi2_info: Optional[Dict[str, int]] = None,
+                                gray_value: Optional[float] = None,
+                                difference_threshold: float = 1.1,
+                                pre_post_avg_frames: int = 5,
+                                roi2_threshold_used: Optional[float] = None,
+                                roi1_threshold_used: float = 0.0,
+                                bg_mean: Optional[float] = None) -> Dict[str, Any]:
+        """
+        创建混合检测波峰数据记录，包含ROI1和ROI2的完整信息
+
+        Args:
+            timestamp: 时间戳
+            start_frame: 波峰开始帧
+            end_frame: 波峰结束帧
+            hybrid_peak: 混合检测结果字典
+            frame_index: 当前帧索引
+            roi2_curve: ROI2灰度曲线
+            roi1_curve: ROI1灰度曲线
+            intersection: 绿线交点坐标
+            roi2_info: ROI2区域信息
+            gray_value: 当前ROI2灰度值
+            difference_threshold: ROI2颜色判定阈值
+            pre_post_avg_frames: 前后平均帧数
+            roi2_threshold_used: ROI2使用的阈值
+            roi1_threshold_used: ROI1使用的阈值
+            bg_mean: ROI2背景均值
+
+        Returns:
+            Dict: 混合检测波峰数据记录
+        """
+        # 获取混合检测的核心信息
+        color = hybrid_peak.get('color', 'unknown')
+        method = hybrid_peak.get('method', 'roi2')  # 'roi2' 或 'roi1_fallback'
+        confidence = hybrid_peak.get('confidence', 0.0)
+        quality_score = hybrid_peak.get('quality_score', 0.0)
+        roi1_frame_diff = hybrid_peak.get('roi1_frame_diff', 0.0)
+        roi2_frame_diff = hybrid_peak.get('roi2_frame_diff', 0.0)
+
+        # 计算ROI2在波峰区间的前后平均值（与_create_peak_data逻辑一致）
+        pre_frames = int(pre_post_avg_frames) if int(pre_post_avg_frames) > 0 else 5
+        pre_start = max(0, start_frame - pre_frames)
+        pre_end = start_frame - 1
+        pre_avg = 0.0
+
+        if pre_start <= pre_end and pre_end < len(roi2_curve):
+            pre_values = roi2_curve[pre_start:pre_end + 1]
+            pre_avg = sum(pre_values) / len(pre_values) if pre_values else 0.0
+
+        post_frames = int(pre_post_avg_frames) if int(pre_post_avg_frames) > 0 else 5
+        post_start = end_frame + 1
+        post_end = min(len(roi2_curve) - 1, end_frame + post_frames)
+        post_avg = 0.0
+
+        if 0 <= post_start <= post_end:
+            post_values = roi2_curve[post_start:post_end + 1]
+            post_avg = sum(post_values) / len(post_values) if post_values else 0.0
+
+        # 计算ROI1和ROI2在波峰区间的最大值
+        roi2_peak_max = self._get_peak_max_value(roi2_curve, start_frame, end_frame)
+        roi1_peak_max = 0.0
+        if roi1_curve:
+            roi1_peak_max = self._get_peak_max_value(roi1_curve, start_frame, end_frame)
+
+        # 创建混合检测特有数据结构
+        hybrid_data = {
+            # 基础字段（兼容传统检测）
+            'peak_type': color,
+            'frame_index': frame_index,
+            'pre_peak_avg': round(pre_avg, 2),
+            'post_peak_avg': round(post_avg, 2),
+            'frame_diff': round(roi2_frame_diff, 3),  # 使用ROI2的帧差作为主要判定依据
+            'difference_threshold_used': round(float(difference_threshold), 3),
+            'threshold_used': round(float(roi2_threshold_used), 3) if roi2_threshold_used is not None else 0.0,
+            'bg_mean': round(float(bg_mean), 3) if bg_mean is not None else 0.0,
+            'peak_max_value': round(roi2_peak_max, 2),
+
+            # 混合检测特有字段
+            'detection_method': 'hybrid',
+            'detection_strategy': 'roi1_peaks_roi2_color',
+            'color_method': method,  # 'roi2' 或 'roi1_fallback'
+            'confidence_score': round(confidence, 3),
+            'quality_score': round(quality_score, 3),
+            'fallback_used': (method == 'roi1_fallback'),
+
+            # ROI1相关信息
+            'roi1_threshold_used': round(roi1_threshold_used, 3),
+            'roi1_frame_diff': round(roi1_frame_diff, 3),
+            'roi1_peak_max': round(roi1_peak_max, 2),
+            'peak_start_frame': start_frame,
+            'peak_end_frame': end_frame,
+            'peak_width_frames': end_frame - start_frame + 1,
+
+            # ROI2增强信息
+            'roi2_threshold_used': round(float(roi2_threshold_used), 3) if roi2_threshold_used is not None else 0.0,
+            'roi2_frame_diff': round(roi2_frame_diff, 3),
+            'roi2_pre_avg': round(hybrid_peak.get('pre_avg', pre_avg), 2),
+            'roi2_post_avg': round(hybrid_peak.get('post_avg', post_avg), 2),
+            'roi2_peak_max': round(roi2_peak_max, 2),
+
+            # 兼容字段
+            'intersection': intersection,
+            'roi2_info': roi2_info,
+            'gray_value': gray_value,
+            'timestamp': timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        }
+
+        return hybrid_data
 
     def _calculate_classification_reason(self, frame_diff: float, threshold: float, peak_type: str) -> str:
         """计算波峰分类原因（为什么是红色/绿色）"""

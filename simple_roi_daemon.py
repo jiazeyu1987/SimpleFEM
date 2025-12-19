@@ -545,6 +545,235 @@ def setup_peak_logger() -> logging.Logger:
     return logger
 
 
+def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
+                          config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    混合波峰检测：ROI1检测波峰区间，ROI2在相同区间内判定颜色
+
+    Args:
+        roi1_curve: ROI1灰度曲线数据
+        roi2_curve: ROI2灰度曲线数据（与ROI1完全同步）
+        config: 混合检测配置参数
+
+    Returns:
+        hybrid_peaks: 混合检测结果列表
+    """
+    from peak_detection import detect_peaks
+
+    hybrid_peaks = []
+
+    # 1. 使用ROI1数据进行波峰检测（ROI1独立阈值）
+    try:
+        roi1_green_peaks_raw, roi1_red_peaks_raw = detect_peaks(
+            roi1_curve,
+            threshold=config['roi1_threshold'],
+            marginFrames=config['margin_frames'],
+            silenceFrames=config['silence_frames'],
+            avgFrames=config['pre_post_avg_frames'],
+            differenceThreshold=999.0,  # 设为很大的值，让ROI1只检测波峰，不做颜色分类
+        )
+    except Exception as e:
+        print(f"[混合检测] ROI1波峰检测失败: {e}")
+        return []
+
+    # 合并ROI1检测到的所有波峰（不区分颜色）
+    roi1_all_peaks = roi1_green_peaks_raw + roi1_red_peaks_raw
+
+    # 过滤最小宽度的波峰
+    min_width = config.get('min_peak_width', 5)
+    max_width = config.get('max_peak_width', 100)
+    filtered_peaks = []
+    for peak_start, peak_end in roi1_all_peaks:
+        peak_width = peak_end - peak_start + 1
+        if min_width <= peak_width <= max_width:
+            filtered_peaks.append((peak_start, peak_end))
+
+    print(f"[混合检测] ROI1检测到{len(roi1_all_peaks)}个波峰，过滤后剩余{len(filtered_peaks)}个")
+
+    # 2. 对每个ROI1检测到的波峰，使用ROI2数据进行颜色判定
+    for peak_start, peak_end in filtered_peaks:
+        peak_width = peak_end - peak_start + 1
+
+        # 使用ROI2数据进行颜色判定
+        color_result = determine_roi2_color_in_interval(
+            peak_start, peak_end, roi2_curve, config
+        )
+
+        # 创建混合检测结果
+        hybrid_peak = {
+            'peak_interval': (peak_start, peak_end),
+            'width': peak_width,
+            'color': color_result['color'],
+            'method': color_result['method'],
+            'confidence': color_result['confidence'],
+            'roi1_frame_diff': 0.0,  # ROI1不做前后差异计算
+            'roi2_frame_diff': color_result['frame_difference'],
+            'pre_avg': color_result.get('pre_avg', 0.0),
+            'post_avg': color_result.get('post_avg', 0.0),
+            'quality_score': color_result.get('quality_score', 0.0)
+        }
+
+        hybrid_peaks.append(hybrid_peak)
+
+        print(f"[混合检测] 波峰[{peak_start}-{peak_end}] {peak_width}帧: {color_result['color']}色 "
+              f"(方法:{color_result['method']}, 置信度:{color_result['confidence']:.2f})")
+
+    return hybrid_peaks
+
+
+def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
+                                   roi2_curve: List[float],
+                                   config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    在ROI1检测的波峰区间内，使用ROI2数据进行颜色判定
+
+    Args:
+        peak_start: 波峰开始帧
+        peak_end: 波峰结束帧
+        roi2_curve: ROI2灰度曲线
+        config: 配置参数
+
+    Returns:
+        颜色判定结果
+    """
+    pre_frames = config.get('roi2_pre_frames', 5)
+    post_frames = config.get('roi2_post_frames', 10)
+    color_threshold = config.get('roi2_color_threshold', 1.5)
+    min_frames = config.get('minimum_roi2_frames', 15)
+    min_variance = config.get('roi2_minimum_variance', 0.5)
+    fallback_enabled = config.get('fallback_enabled', True)
+
+    try:
+        # 检查ROI2数据是否充足
+        roi2_interval_length = len(roi2_curve)
+        if roi2_interval_length < min_frames:
+            if fallback_enabled:
+                return {
+                    'color': 'red',
+                    'method': 'roi1_fallback',
+                    'confidence': 0.0,
+                    'frame_difference': 0.0,
+                    'error': f'ROI2数据不足({roi2_interval_length} < {min_frames})，回退到ROI1'
+                }
+            else:
+                return {
+                    'color': 'red',
+                    'method': 'error',
+                    'confidence': 0.0,
+                    'frame_difference': 0.0,
+                    'error': f'ROI2数据不足且未启用回退'
+                }
+
+        # 计算ROI2在波峰区间前的平均值
+        pre_start = max(0, peak_start - pre_frames)
+        pre_values = roi2_curve[pre_start:peak_start]
+        pre_avg = sum(pre_values) / len(pre_values) if pre_values else roi2_curve[peak_start] if peak_start < len(roi2_curve) else 0.0
+
+        # 计算ROI2在波峰区间后的平均值
+        post_end = min(len(roi2_curve), peak_end + post_frames + 1)
+        post_values = roi2_curve[peak_end + 1:post_end]
+        post_avg = sum(post_values) / len(post_values) if post_values else roi2_curve[peak_end] if peak_end < len(roi2_curve) else 0.0
+
+        # 颜色判定：基于前后差异
+        frame_difference = post_avg - pre_avg
+        color = "green" if frame_difference >= color_threshold else "red"
+
+        # 计算置信度
+        confidence = min(abs(frame_difference) / max(color_threshold, abs(frame_difference)), 1.0)
+
+        # 计算数据质量评分
+        quality_info = calculate_roi2_data_quality(peak_start, peak_end, roi2_curve)
+
+        return {
+            'color': color,
+            'method': 'roi2',
+            'frame_difference': frame_difference,
+            'threshold': color_threshold,
+            'pre_avg': pre_avg,
+            'post_avg': post_avg,
+            'confidence': confidence,
+            'quality_score': quality_info['quality_score'],
+            'variance': quality_info.get('variance', 0.0),
+            'data_range': quality_info.get('data_range', 0.0)
+        }
+
+    except Exception as e:
+        if fallback_enabled:
+            return {
+                'color': 'red',
+                'method': 'roi1_fallback',
+                'confidence': 0.0,
+                'frame_difference': 0.0,
+                'error': f'ROI2计算错误({str(e)})，回退到ROI1'
+            }
+        else:
+            return {
+                'color': 'red',
+                'method': 'error',
+                'confidence': 0.0,
+                'frame_difference': 0.0,
+                'error': f'ROI2计算错误且未启用回退: {str(e)}'
+            }
+
+
+def calculate_roi2_data_quality(peak_start: int, peak_end: int,
+                               roi2_curve: List[float]) -> Dict[str, float]:
+    """
+    计算ROI2在波峰区间内的数据质量评分
+
+    Args:
+        peak_start: 波峰开始帧
+        peak_end: 波峰结束帧
+        roi2_curve: ROI2灰度曲线
+
+    Returns:
+        数据质量指标
+    """
+    try:
+        # 提取ROI2在波峰区间内的数据
+        if peak_start >= len(roi2_curve) or peak_end >= len(roi2_curve):
+            return {'quality_score': 0.0, 'error': '波峰区间超出ROI2数据范围'}
+
+        interval_values = roi2_curve[peak_start:peak_end + 1]
+
+        if not interval_values:
+            return {'quality_score': 0.0, 'error': '无ROI2数据'}
+
+        # 计算基本统计指标
+        import math
+        mean_val = sum(interval_values) / len(interval_values)
+        variance_val = sum((x - mean_val) ** 2 for x in interval_values) / len(interval_values)
+        std_dev = math.sqrt(variance_val)
+
+        # 计算数据范围
+        data_max = max(interval_values)
+        data_min = min(interval_values)
+        data_range = data_max - data_min
+
+        # 计算数据稳定性（标准差相对于数据范围的比率）
+        stability_score = max(0, 1.0 - std_dev / max(10.0, data_range))
+
+        # 计算数据一致性（避免过度波动）
+        consistency = 1.0 - min(1.0, std_dev / mean_val) if mean_val > 0 else 0.0
+
+        # 综合质量评分
+        quality_score = (stability_score + consistency) / 2.0
+
+        return {
+            'quality_score': quality_score,
+            'stability_score': stability_score,
+            'consistency': consistency,
+            'variance': variance_val,
+            'std_dev': std_dev,
+            'data_range': data_range,
+            'frame_count': len(interval_values),
+            'mean_val': mean_val
+        }
+
+    except Exception as e:
+        return {'quality_score': 0.0, 'error': f'质量计算错误: {str(e)}'}
+
+
 def adjust_roi1_to_screen(
     screen_size: Tuple[int, int],
     roi_default: Dict[str, int],
@@ -868,6 +1097,28 @@ def run_daemon() -> None:
         roi1_stability_frames = int(roi1_protection_conf.get("stability_frames", 5))
         roi1_waveform_trigger_enabled = bool(roi1_protection_conf.get("waveform_trigger_enabled", True))
 
+        # 混合检测配置参数读取
+        hybrid_conf = config.get("hybrid_detection", {})
+        hybrid_enabled = bool(hybrid_conf.get("enabled", False))
+        detection_strategy = hybrid_conf.get("detection_strategy", "roi1_peaks_roi2_color")
+        fusion_strategy = hybrid_conf.get("fusion_strategy", "roi2_priority")
+
+        # ROI2颜色判定配置
+        roi2_color_config = hybrid_conf.get("roi2_color_frames", {})
+        roi2_pre_frames = int(roi2_color_config.get("pre_peak", 5))
+        roi2_post_frames = int(roi2_color_config.get("post_peak", 10))
+
+        # ROI1波峰宽度验证配置
+        peak_width_config = hybrid_conf.get("roi1_peak_width_range", [30, 40])
+        min_peak_width = int(peak_width_config[0])
+        max_peak_width = int(peak_width_config[1])
+
+        # 数据质量检查配置
+        data_quality_conf = hybrid_conf.get("data_quality", {})
+        min_roi2_frames = int(data_quality_conf.get("minimum_roi2_frames", 15))
+        roi2_min_variance = float(data_quality_conf.get("roi2_minimum_variance", 0.5))
+        fallback_enabled = bool(hybrid_conf.get("fallback_enabled", True))
+
         logger = setup_peak_logger()
         # Store only the latest 100 gray values for waveform / peak detection
         gray_buffer: Deque[float] = deque(maxlen=100)
@@ -893,6 +1144,9 @@ def run_daemon() -> None:
         roi1_protection_end_time: float = 0.0
         roi1_consecutive_below_threshold: int = 0
         roi1_last_waveform_time: float = 0.0
+        # Initialize ROI1 threshold used so hybrid detection can reference it
+        # before the per-frame ROI1 adaptive-threshold block runs.
+        roi1_threshold_used: float = max(roi1_threshold, roi1_threshold_minimum)
 
         # Prepare per-video image save directories if enabled
         if processing_mode == "video" and video_files:
@@ -1297,30 +1551,94 @@ def run_daemon() -> None:
                                 threshold_used = max(threshold_used, threshold_minimum)
                             #print(f"[阈值保护] 保护期间使用冻结阈值: {threshold_used:.1f} (下限: {threshold_minimum:.1f})")
 
-                    # Now run actual peak detection with the determined threshold
-                    try:
-                        green_peaks_raw, red_peaks_raw = detect_peaks(
-                            curve,
-                            threshold=threshold_used,
-                            marginFrames=margin_frames,
-                            differenceThreshold=diff_threshold,
-                            silenceFrames=silence_frames,
-                            avgFrames=pre_post_avg_frames,
-                        )
-                    except Exception:
-                        green_peaks_raw, red_peaks_raw = [], []
+                    # 混合检测模式集成
+                    hybrid_peaks: List[Dict[str, Any]] = []
+                    if hybrid_enabled and roi1_enabled and len(roi1_gray_buffer) > 0 and len(gray_buffer) > 0:
+                        # 混合检测模式：ROI1检测波峰，ROI2判定颜色
+                        roi1_curve = list(roi1_gray_buffer)
+                        roi2_curve = list(gray_buffer)
 
-                    # Apply min_region_length filter
-                    green_peaks = [
-                        (start, end)
-                        for start, end in green_peaks_raw
-                        if (end - start + 1) >= min_region_length
-                    ]
-                    red_peaks = [
-                        (start, end)
-                        for start, end in red_peaks_raw
-                        if (end - start + 1) >= min_region_length
-                    ]
+                        hybrid_config = {
+                            'roi1_threshold': roi1_threshold_used,
+                            'margin_frames': roi1_margin_frames,
+                            'silence_frames': roi1_silence_frames,
+                            'pre_post_avg_frames': roi1_pre_post_avg_frames,
+                            'min_peak_width': roi1_min_region_length,
+                            'max_peak_width': max_peak_width,
+                            'roi2_pre_frames': roi2_pre_frames,
+                            'roi2_post_frames': roi2_post_frames,
+                            'minimum_roi2_frames': min_roi2_frames,
+                            'roi2_minimum_variance': roi2_min_variance,
+                            'roi2_color_threshold': diff_threshold,
+                            'fallback_enabled': fallback_enabled
+                        }
+
+                        print(f"[混合检测] 开始分析 - ROI1曲线长度:{len(roi1_curve)}, ROI2曲线长度:{len(roi2_curve)}")
+
+                        # 执行混合检测
+                        try:
+                            hybrid_peaks = hybrid_peak_detection(roi1_curve, roi2_curve, hybrid_config)
+
+                            # 转换为传统格式以保持兼容性
+                            green_peaks = []
+                            red_peaks = []
+                            for peak in hybrid_peaks:
+                                if peak['color'] == 'green':
+                                    green_peaks.append(peak['peak_interval'])
+                                else:
+                                    red_peaks.append(peak['peak_interval'])
+
+                            # 统计颜色数量和质量
+                            green_count = len(green_peaks)
+                            red_count = len(red_peaks)
+                            avg_quality = sum(peak.get('quality_score', 0) for peak in hybrid_peaks) / len(hybrid_peaks) if hybrid_peaks else 0
+
+                            print(f"[混合检测] 结果统计: 绿色{green_count}个, 红色{red_count}个, 平均质量{avg_quality:.2f}")
+
+                            # 详细日志输出
+                            for i, peak in enumerate(hybrid_peaks[:5]):  # 只显示前5个
+                                start, end = peak['peak_interval']
+                                width = end - start + 1
+                                method = peak['method']
+                                color = peak['color']
+                                confidence = peak.get('confidence', 0)
+                                print(f"  波峰{i+1}: [{start}-{end}] {width}帧, {color}色, 方法:{method}, 置信度:{confidence:.2f}")
+
+                        except Exception as e:
+                            print(f"[混合检测] 执行失败: {e}")
+                            # 回退到传统ROI2检测
+                            hybrid_peaks = []
+                            green_peaks, red_peaks = [], []
+
+                    else:
+                        # 保持原有的ROI2独立检测逻辑作为后备
+                        if hybrid_enabled:
+                            print(f"[传统检测] 混合检测未启用或数据不足，使用ROI2独立检测模式")
+
+                        # Now run actual ROI2 peak detection with the determined threshold
+                        try:
+                            green_peaks_raw, red_peaks_raw = detect_peaks(
+                                curve,
+                                threshold=threshold_used,
+                                marginFrames=margin_frames,
+                                differenceThreshold=diff_threshold,
+                                silenceFrames=silence_frames,
+                                avgFrames=pre_post_avg_frames,
+                            )
+                        except Exception:
+                            green_peaks_raw, red_peaks_raw = [], []
+
+                        # Apply min_region_length filter
+                        green_peaks = [
+                            (start, end)
+                            for start, end in green_peaks_raw
+                            if (end - start + 1) >= min_region_length
+                        ]
+                        red_peaks = [
+                            (start, end)
+                            for start, end in red_peaks_raw
+                            if (end - start + 1) >= min_region_length
+                        ]
 
                     # Re-check threshold protection with actual peak detection results
                     if protection_enabled and roi2_gray is not None:
@@ -1350,6 +1668,13 @@ def run_daemon() -> None:
                 roi1_threshold_used = max(roi1_threshold, roi1_threshold_minimum)
                 roi1_curve = list(roi1_gray_buffer) if roi1_gray_buffer else []
                 if roi1_enabled and roi1_gray_buffer:
+                    # 每50帧打印一次ROI1阈值使用情况
+                    if frame_index % 50 == 0:
+                        print(f"[ROI1阈值] 配置值={roi1_threshold:.1f}, 下限={roi1_threshold_minimum:.1f}, 使用={roi1_threshold_used:.1f}")
+                        if roi1_adaptive_threshold_enabled and roi1_bg_count > 0:
+                            print(f"[ROI1阈值] 自适应背景均值={roi1_bg_mean:.1f}, 比例={roi1_threshold_over_mean_ratio:.2f}")
+                        else:
+                            print(f"[ROI1阈值] 使用固定阈值")
                     roi1_adaptive_window_frames = int(roi1_adaptive_window_seconds * effective_frame_rate)
                     roi1_adaptive_window_frames = max(1, min(roi1_adaptive_window_frames, 100))
 
@@ -1407,19 +1732,28 @@ def run_daemon() -> None:
                     # Add detected peaks to statistics with deduplication
                     current_stats = statistics_manager.current_statistics
                     if current_stats:
+                        # 准备ROI1曲线数据用于混合检测统计
+                        roi1_curve_for_stats = list(roi1_gray_buffer) if roi1_gray_buffer else []
+
+                        # 调用扩展的add_peaks_from_daemon方法，支持混合检测
                         stats_write_results = current_stats.add_peaks_from_daemon(
                             frame_index=frame_index,
                             green_peaks=green_peaks,
                             red_peaks=red_peaks,
-                        curve=list(gray_buffer) if gray_buffer else [],
-                        intersection=last_intersection_roi,
-                        roi2_info=roi2_info,
-                        gray_value=roi2_gray,
-                        difference_threshold=diff_threshold,
-                        pre_post_avg_frames=pre_post_avg_frames,
-                        threshold_used=threshold_used,
-                        bg_mean=(bg_mean if bg_count > 0 else None),
-                    )
+                            curve=list(gray_buffer) if gray_buffer else [],
+                            intersection=last_intersection_roi,
+                            roi2_info=roi2_info,
+                            gray_value=roi2_gray,
+                            difference_threshold=diff_threshold,
+                            pre_post_avg_frames=pre_post_avg_frames,
+                            threshold_used=threshold_used,
+                            bg_mean=(bg_mean if bg_count > 0 else None),
+                            # 混合检测参数
+                            hybrid_enabled=hybrid_enabled,
+                            hybrid_peaks=hybrid_peaks,
+                            roi1_curve=roi1_curve_for_stats,
+                            roi1_threshold_used=roi1_threshold_used
+                        )
 
                 except Exception as e:
                     # Keep daemon running even if statistics collection fails
