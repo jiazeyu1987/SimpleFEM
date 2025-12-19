@@ -257,6 +257,42 @@ def _get_base_dir() -> str:
 BASE_DIR = _get_base_dir()
 
 
+def reset_video_state_variables(
+    gray_buffer=None,
+    bg_count=None,
+    bg_mean=None,
+    last_intersection_roi=None,
+    frames_since_protection_end=None,
+    threshold_protection_active=None,
+    protection_end_time=None,
+    consecutive_below_threshold=None,
+    last_waveform_time=None,
+    frame_index=None,
+    first_video_frame=None
+) -> None:
+    """
+    重置视频处理相关的状态变量，防止多视频分析时数据污染
+
+    这个函数返回重置后的值，调用者需要重新赋值
+    """
+    if gray_buffer is not None:
+        gray_buffer.clear()
+
+    # 返回重置后的值
+    return (
+        0,  # bg_count
+        0.0,  # bg_mean
+        None,  # last_intersection_roi
+        0,  # frames_since_protection_end
+        False,  # threshold_protection_active
+        0.0,  # protection_end_time
+        0,  # consecutive_below_threshold
+        0.0,  # last_waveform_time
+        0,  # frame_index
+        True  # first_video_frame
+    )
+
+
 def _setup_import_paths() -> None:
     """
     Ensure we can import local peak_detection and green_detector modules.
@@ -979,9 +1015,27 @@ def run_daemon() -> None:
                                     old_debug_info = intersection_filter.get_debug_info()
                                     intersection_filter.reset()
                                     print(f"已重置ROI2防抖动滤波器，切换到新视频: {os.path.basename(next_video_path)}")
-                                    print(f"上一个视频的防抖动统计: 处理{old_debug_info['frame_count']}帧, "
-                                          f"大运动{old_debug_info['large_movement_count']}次, "
-                                          f"边界限制{old_debug_info['boundary_clamp_count']}次")
+
+                                    # 根据滤波器类型显示不同的统计信息
+                                    if 'update_count' in old_debug_info:
+                                        # 阈值式滤波器
+                                        print(f"上一个视频的阈值防抖动统计: 处理{old_debug_info['frame_count']}帧, "
+                                              f"更新{old_debug_info['update_count']}次, "
+                                              f"稳定率{old_debug_info.get('stability_rate', 0):.1f}%")
+                                    else:
+                                        # EMA滤波器
+                                        print(f"上一个视频的EMA防抖动统计: 处理{old_debug_info['frame_count']}帧, "
+                                              f"大运动{old_debug_info['large_movement_count']}次, "
+                                              f"边界限制{old_debug_info.get('boundary_clamp_count', 0)}次")
+
+                                # 重置全局状态变量（防止数据污染）
+                                gray_buffer.clear()
+                                reset_values = reset_video_state_variables(gray_buffer)
+                                (bg_count, bg_mean, last_intersection_roi, frames_since_protection_end,
+                                 threshold_protection_active, protection_end_time, consecutive_below_threshold,
+                                 last_waveform_time, frame_index, first_video_frame) = reset_values
+
+                                print(f"已重置全局状态变量，确保数据隔离")
 
                                 video_cap = initialize_video_capture(next_video_path)
                                 print(f"\n" + "="*50)
@@ -1559,11 +1613,22 @@ def run_daemon() -> None:
                 debug_info = intersection_filter.get_debug_info()
                 print(f"\n防抖动滤波器最终统计:")
                 print(f"  总处理帧数: {debug_info['frame_count']}")
-                print(f"  大运动事件: {debug_info['large_movement_count']}次")
-                print(f"  边界限制事件: {debug_info['boundary_clamp_count']}次")
-                print(f"  最终参数: alpha={debug_info['parameters']['alpha']}, "
-                      f"threshold={debug_info['parameters']['movement_threshold']}px, "
-                      f"init_frames={debug_info['parameters']['initialization_frames']}")
+
+                # 根据滤波器类型显示不同信息
+                if 'update_count' in debug_info:
+                    # 阈值式滤波器
+                    print(f"  更新次数: {debug_info['update_count']}")
+                    print(f"  忽略次数: {debug_info['ignore_count']}")
+                    print(f"  稳定率: {debug_info.get('stability_rate', 0):.1f}%")
+                    print(f"  大运动事件: {debug_info['large_movement_count']}次")
+                    print(f"  阈值参数: threshold={debug_info['parameters']['movement_threshold']}px")
+                else:
+                    # EMA滤波器
+                    print(f"  大运动事件: {debug_info['large_movement_count']}次")
+                    print(f"  边界限制事件: {debug_info['boundary_clamp_count']}次")
+                    print(f"  稳定事件: {debug_info['stability_count']}次")
+                    print(f"  EMA参数: alpha={debug_info['parameters']['alpha']}, "
+                          f"threshold={debug_info['parameters']['movement_threshold']}px")
             except Exception as e:
                 print(f"获取防抖动统计信息失败: {e}")
 
