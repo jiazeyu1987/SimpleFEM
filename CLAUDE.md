@@ -19,8 +19,12 @@ python auto_vein_detector.py
 # Run the built standalone executable (after building)
 dist\SimpleFEM_ROI_Daemon.exe
 
-# Validate implementation
-python verify_implementation.py
+# Test improved peak detection algorithms
+python improved_peak_detection.py
+
+# Test anti-jitter implementations
+python test_anti_jitter.py
+python manual_test_anti_jitter.py
 ```
 
 ### Building Standalone Executable
@@ -40,14 +44,28 @@ type 打包命令.txt
 # Verify core module imports
 python -c "from green_detector import detect_green_intersection; print('Green detector OK')"
 python -c "from peak_detection import detect_peaks; print('Peak detection OK')"
-python -c "from safe_peak_statistics import safe_statistics; print('Statistics OK')"
+python -c "from safe_peak_statistics import SafePeakStatistics; print('Statistics OK')"
 
 # Test peak detection algorithms
-python simple_peak_test.py
 python improved_peak_detection.py
 
-# Test vein detection system
-python auto_vein_detector.py
+# Test ROI1 implementations and thresholds
+python test_roi1_implementation.py
+python test_roi1_threshold.py
+python test_roi1_simple.py
+
+# Test anti-jitter and stability fixes
+python test_anti_jitter.py
+python manual_test_anti_jitter.py
+python verify_anti_jitter_simple.py
+
+# Test multi-video processing
+python test_multi_video_fix.py
+
+# Debug and diagnose issues
+python diagnose_basic.py
+python debug_wave1.py
+python analyze_roi2_jitter.py
 ```
 
 ### Configuration Management
@@ -235,6 +253,24 @@ intersection = compute_line_intersection(selected_lines)
 - **Multi-Algorithm Support**: Basic threshold detection + improved morphological operations
 - **Lifecycle Tracking**: Peak evolution monitoring with state transitions (white → green/red)
 
+### 3.1 Anti-Jitter and ROI Stabilization
+SimpleFEM includes multiple anti-jitter mechanisms to ensure stable ROI tracking:
+
+#### Intersection Filtering (`green_detector.py`):
+- **EMA Smoothing**: Exponential moving average for intersection point filtering
+- **Velocity Filtering**: Rejects intersection movements exceeding configurable velocity thresholds
+- **Threshold-Based Filtering**: Fixed and adaptive threshold methods for ROI stabilization
+
+#### Threshold-Based Anti-Jitter (`threshold_based_anti_jitter.py`):
+- **Pixel Intensity Analysis**: Analyzes pixel distribution within ROI2
+- **Adaptive Thresholding**: Dynamic threshold calculation based on local statistics
+- **Movement Validation**: Validates ROI movements based on pixel intensity patterns
+
+#### Multi-Algorithm Support:
+- **Hybrid Detection**: ROI1 detects peaks, ROI2 performs color classification
+- **Consistency Validation**: Cross-validation between different detection methods
+- **Fallback Mechanisms**: Graceful degradation when primary detection fails
+
 ### 4. Vein Detection and Following
 ```python
 # Connected component analysis in 0-10 pixel range
@@ -310,8 +346,17 @@ SimpleFEM/
 │   ├── simple_fem_config.json    # Primary HEM detection configuration
 │   └── vein_detection_config.json # Vein-specific tracking parameters
 ├── Testing and Validation/
-│   ├── simple_peak_test.py       # Peak detection algorithm testing
-│   └── verify_implementation.py  # Module integrity validation
+│   ├── Algorithm Testing/
+│   │   ├── improved_peak_detection.py  # Enhanced peak detection algorithms
+│   │   ├── test_anti_jitter.py         # Anti-jitter mechanism testing
+│   │   └── test_roi1_*.py             # ROI1 implementation variants
+│   ├── Debug and Diagnosis/
+│   │   ├── diagnose_basic.py           # Basic system diagnostics
+│   │   ├── debug_wave1.py              # Waveform debugging
+│   │   └── analyze_roi2_jitter.py      # ROI2 jitter analysis
+│   └── Validation/
+│       ├── verify_*.py                 # Implementation verification scripts
+│       └── manual_test_anti_jitter.py  # Manual anti-jitter testing
 ├── Build System/
 │   ├── 打包命令.txt               # PyInstaller build command
 │   └── dist/                     # Standalone executable output
@@ -350,13 +395,30 @@ While SimpleFEM operates independently, it integrates with the broader NHEM syst
 
 ## Important Development Notes
 
+### Core System Characteristics
 - **Dual Input Modes**: Supports both real-time screen capture and video file processing
 - **Adaptive Thresholding**: Background-based threshold calculation with configurable ratios
 - **Peak Classification**: Green (post-peak > pre-peak + threshold) vs Red (all other peaks)
 - **Standalone Operation**: No network dependencies or external services required
-- **Windows Platform**: Designed specifically for Windows screen capture capabilities
+- **Windows Platform**: Designed specifically for Windows screen capture capabilities using PIL.ImageGrab
 - **Resource Efficiency**: Fixed circular buffers prevent memory leaks during continuous operation
 - **Medical Reliability**: Built for medical applications with comprehensive error handling
 - **Configuration Management**: Runtime configuration changes via JSON without restart
 - **Data Security**: Local processing with no external data transmission
 - **Build System**: PyInstaller creates standalone executables with embedded configuration
+
+### Recent System Improvements
+- **Anti-Jitter Mechanisms**: Multiple filtering algorithms for stable ROI tracking
+- **Enhanced Peak Detection**: Improved algorithms with lifecycle tracking and morphological operations
+- **Multi-Video Support**: Batch processing with automatic video switching and session management
+- **Threshold Protection**: Prevents peak contamination of background calculations
+- **Hybrid Detection**: Separate ROI1 (peak detection) and ROI2 (color classification) pipelines
+- **Velocity Filtering**: Rejects rapid intersection movements that indicate detection instability
+- **Consistency Validation**: Cross-validation between different detection methods
+
+### Development Environment Considerations
+- **Python Dependencies**: Core modules (numpy, opencv-python, Pillow, matplotlib) are bundled in executable
+- **Testing Infrastructure**: Extensive test suite with debugging and diagnostic tools
+- **Windows-Specific**: Screen capture functionality requires Windows platform
+- **Resource Management**: Automatic cleanup of memory, file handles, and video resources
+- **Thread Safety**: Concurrent operations with proper synchronization mechanisms

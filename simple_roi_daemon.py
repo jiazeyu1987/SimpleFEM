@@ -546,7 +546,9 @@ def setup_peak_logger() -> logging.Logger:
 
 
 def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
-                          config: Dict[str, Any]) -> List[Dict[str, Any]]:
+                          config: Dict[str, Any],
+                          processed_peaks: Dict[Tuple[int, int], str] = None,
+                          peak_counter: int = 0) -> List[Dict[str, Any]]:
     """
     混合波峰检测：ROI1检测波峰区间，ROI2在相同区间内判定颜色
 
@@ -554,13 +556,21 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
         roi1_curve: ROI1灰度曲线数据
         roi2_curve: ROI2灰度曲线数据（与ROI1完全同步）
         config: 混合检测配置参数
+        processed_peaks: 已处理的ROI1波峰字典 {(start, end): peak_id}
+        peak_counter: ROI1波峰ID计数器
 
     Returns:
-        hybrid_peaks: 混合检测结果列表
+        hybrid_peaks: 混合检测结果列表（包含唯一ID）
     """
     from peak_detection import detect_peaks
 
     hybrid_peaks = []
+
+    # 初始化ROI1波峰管理
+    if processed_peaks is None:
+        processed_peaks = {}
+
+    buffer_start_frame_index = int(config.get("buffer_start_frame_index", 1))
 
     # 1. 使用ROI1数据进行波峰检测（ROI1独立阈值）
     try:
@@ -582,16 +592,39 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
     # 过滤最小宽度的波峰
     min_width = config.get('min_peak_width', 5)
     max_width = config.get('max_peak_width', 100)
-    filtered_peaks = []
+    new_peaks: List[Tuple[int, int, str, int]] = []
+    duplicate_count = 0
+
     for peak_start, peak_end in roi1_all_peaks:
         peak_width = peak_end - peak_start + 1
         if min_width <= peak_width <= max_width:
-            filtered_peaks.append((peak_start, peak_end))
+            # Use absolute peak max position as a stable dedup key so the same
+            # physical peak is not re-detected when the sliding buffer shifts.
+            peak_slice = roi1_curve[peak_start : peak_end + 1]
+            local_max_offset = 0
+            if peak_slice:
+                local_max_offset = max(range(len(peak_slice)), key=lambda i: peak_slice[i])
+            abs_peak_max = buffer_start_frame_index + peak_start + local_max_offset
+            peak_key = abs_peak_max
 
-    print(f"[混合检测] ROI1检测到{len(roi1_all_peaks)}个波峰，过滤后剩余{len(filtered_peaks)}个")
+            # 检查是否已经处理过这个ROI1波峰
+            if peak_key in processed_peaks:
+                duplicate_count += 1
+                print(f"[混合检测] ROI1波峰[{peak_start}-{peak_end}]已处理过(peak_max={abs_peak_max})，跳过")
+                continue
 
-    # 2. 对每个ROI1检测到的波峰，使用ROI2数据进行颜色判定
-    for peak_start, peak_end in filtered_peaks:
+            # 新的ROI1波峰，生成唯一ID
+            peak_counter += 1
+            peak_id = f"ROI1_MAX_{abs_peak_max:06d}"
+            processed_peaks[peak_key] = peak_id
+
+            new_peaks.append((peak_start, peak_end, peak_id, abs_peak_max))
+            print(f"[混合检测] 新ROI1波峰[{peak_start}-{peak_end}] -> ID: {peak_id}")
+
+    print(f"[混合检测] ROI1检测到{len(roi1_all_peaks)}个波峰，过滤后新增{len(new_peaks)}个，重复{duplicate_count}个")
+
+    # 2. 对每个新的ROI1波峰，使用ROI2数据进行颜色判定
+    for peak_start, peak_end, peak_id, abs_peak_max in new_peaks:
         peak_width = peak_end - peak_start + 1
 
         # 使用ROI2数据进行颜色判定
@@ -599,7 +632,7 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
             peak_start, peak_end, roi2_curve, config
         )
 
-        # 创建混合检测结果
+        # 创建混合检测结果（包含ROI1唯一ID）
         hybrid_peak = {
             'peak_interval': (peak_start, peak_end),
             'width': peak_width,
@@ -610,14 +643,18 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
             'roi2_frame_diff': color_result['frame_difference'],
             'pre_avg': color_result.get('pre_avg', 0.0),
             'post_avg': color_result.get('post_avg', 0.0),
-            'quality_score': color_result.get('quality_score', 0.0)
+            'quality_score': color_result.get('quality_score', 0.0),
+            # ROI1波峰唯一ID信息
+            'roi1_peak_id': peak_id,
+            'roi1_peak_key': abs_peak_max
         }
 
         hybrid_peaks.append(hybrid_peak)
 
         print(f"[混合检测] 波峰[{peak_start}-{peak_end}] {peak_width}帧: {color_result['color']}色 "
-              f"(方法:{color_result['method']}, 置信度:{color_result['confidence']:.2f})")
+              f"(ID:{peak_id}, 方法:{color_result['method']}, 置信度:{color_result['confidence']:.2f})")
 
+    # 返回结果和更新后的状态
     return hybrid_peaks
 
 
@@ -1148,6 +1185,10 @@ def run_daemon() -> None:
         # before the per-frame ROI1 adaptive-threshold block runs.
         roi1_threshold_used: float = max(roi1_threshold, roi1_threshold_minimum)
 
+        # ROI1波峰唯一ID管理机制 - 防止重复记录
+        processed_roi1_peaks: Dict[Tuple[int, int], str] = {}  # {(start, end): peak_id}
+        roi1_peak_counter: int = 0  # 唯一ID计数器
+
         # Prepare per-video image save directories if enabled
         if processing_mode == "video" and video_files:
             # Video mode: Use first video for initial folder creation
@@ -1322,12 +1363,26 @@ def run_daemon() -> None:
 
                                 # 重置全局状态变量（防止数据污染）
                                 gray_buffer.clear()
+                                roi1_gray_buffer.clear()
                                 reset_values = reset_video_state_variables(gray_buffer)
                                 (bg_count, bg_mean, last_intersection_roi, frames_since_protection_end,
                                  threshold_protection_active, protection_end_time, consecutive_below_threshold,
                                  last_waveform_time, frame_index, first_video_frame) = reset_values
 
-                                print(f"已重置全局状态变量，确保数据隔离")
+                                # 重置ROI1状态变量
+                                roi1_bg_count = 0
+                                roi1_bg_mean = 0.0
+                                roi1_threshold_protection_active = False
+                                roi1_protection_end_time = 0.0
+                                roi1_consecutive_below_threshold = 0
+                                roi1_last_waveform_time = 0.0
+                                roi1_threshold_used = max(roi1_threshold, roi1_threshold_minimum)
+
+                                # 重置ROI1波峰ID管理机制
+                                processed_roi1_peaks.clear()
+                                roi1_peak_counter = 0
+
+                                print(f"已重置全局和ROI1状态变量，确保数据隔离")
 
                                 video_cap = initialize_video_capture(next_video_path)
                                 print(f"\n" + "="*50)
@@ -1552,11 +1607,12 @@ def run_daemon() -> None:
                             #print(f"[阈值保护] 保护期间使用冻结阈值: {threshold_used:.1f} (下限: {threshold_minimum:.1f})")
 
                     # 混合检测模式集成
+                    detection_mode = "roi2_legacy"
                     hybrid_peaks: List[Dict[str, Any]] = []
-                    if hybrid_enabled and roi1_enabled and len(roi1_gray_buffer) > 0 and len(gray_buffer) > 0:
+                    if hybrid_enabled and roi1_enabled and len(roi1_gray_buffer) > 0:
                         # 混合检测模式：ROI1检测波峰，ROI2判定颜色
                         roi1_curve = list(roi1_gray_buffer)
-                        roi2_curve = list(gray_buffer)
+                        roi2_curve = list(gray_buffer) if gray_buffer else []
 
                         hybrid_config = {
                             'roi1_threshold': roi1_threshold_used,
@@ -1575,9 +1631,15 @@ def run_daemon() -> None:
 
                         print(f"[混合检测] 开始分析 - ROI1曲线长度:{len(roi1_curve)}, ROI2曲线长度:{len(roi2_curve)}")
 
-                        # 执行混合检测
+                        # 执行混合检测（传递ROI1波峰管理参数）
                         try:
-                            hybrid_peaks = hybrid_peak_detection(roi1_curve, roi2_curve, hybrid_config)
+                            hybrid_config_with_frame = {**hybrid_config, 'frame_index': frame_index}
+                            hybrid_config_with_frame["buffer_start_frame_index"] = frame_index - len(roi1_curve) + 1
+                            hybrid_peaks = hybrid_peak_detection(
+                                roi1_curve, roi2_curve, hybrid_config_with_frame,
+                                processed_roi1_peaks, roi1_peak_counter
+                            )
+                            detection_mode = "hybrid_roi1_peaks_roi2_color"
 
                             # 转换为传统格式以保持兼容性
                             green_peaks = []
@@ -1609,36 +1671,45 @@ def run_daemon() -> None:
                             # 回退到传统ROI2检测
                             hybrid_peaks = []
                             green_peaks, red_peaks = [], []
+                            detection_mode = "hybrid_failed"
 
                     else:
                         # 保持原有的ROI2独立检测逻辑作为后备
                         if hybrid_enabled:
                             print(f"[传统检测] 混合检测未启用或数据不足，使用ROI2独立检测模式")
 
-                        # Now run actual ROI2 peak detection with the determined threshold
-                        try:
-                            green_peaks_raw, red_peaks_raw = detect_peaks(
-                                curve,
-                                threshold=threshold_used,
-                                marginFrames=margin_frames,
-                                differenceThreshold=diff_threshold,
-                                silenceFrames=silence_frames,
-                                avgFrames=pre_post_avg_frames,
-                            )
-                        except Exception:
+                        if hybrid_enabled and roi1_enabled:
+                            if frame_index % 50 == 0:
+                                print("[æ··åˆæ£€æµ‹] ROI1æ•°æ®ä¸è¶³ï¼Œè·³è¿‡æ³¢å³°æ£€æµ‹ï¼ˆä¸å›žé€€åˆ°ROI2æ³¢å³°æ£€æµ‹ï¼‰")
                             green_peaks_raw, red_peaks_raw = [], []
+                            green_peaks, red_peaks = [], []
+                            detection_mode = "hybrid_roi1_insufficient"
+                        else:
+                            # Now run actual ROI2 peak detection with the determined threshold
+                            try:
+                                green_peaks_raw, red_peaks_raw = detect_peaks(
+                                    curve,
+                                    threshold=threshold_used,
+                                    marginFrames=margin_frames,
+                                    differenceThreshold=diff_threshold,
+                                    silenceFrames=silence_frames,
+                                    avgFrames=pre_post_avg_frames,
+                                )
+                            except Exception:
+                                green_peaks_raw, red_peaks_raw = [], []
 
-                        # Apply min_region_length filter
-                        green_peaks = [
-                            (start, end)
-                            for start, end in green_peaks_raw
-                            if (end - start + 1) >= min_region_length
-                        ]
-                        red_peaks = [
-                            (start, end)
-                            for start, end in red_peaks_raw
-                            if (end - start + 1) >= min_region_length
-                        ]
+                            # Apply min_region_length filter
+                            green_peaks = [
+                                (start, end)
+                                for start, end in green_peaks_raw
+                                if (end - start + 1) >= min_region_length
+                            ]
+                            red_peaks = [
+                                (start, end)
+                                for start, end in red_peaks_raw
+                                if (end - start + 1) >= min_region_length
+                            ]
+                            detection_mode = "roi2_legacy"
 
                     # Re-check threshold protection with actual peak detection results
                     if protection_enabled and roi2_gray is not None:
@@ -1820,6 +1891,11 @@ def run_daemon() -> None:
                                 "difference_threshold": float(diff_threshold),
                                 "pre_post_avg_frames": int(pre_post_avg_frames),
                                 "min_region_length": int(min_region_length),
+                            },
+                            "detection": {
+                                "mode": str(detection_mode),
+                                "hybrid_enabled": bool(hybrid_enabled),
+                                "roi1_enabled": bool(roi1_enabled),
                             },
                             "peaks": {
                                 "green_raw": _peaks_to_abs(green_peaks_raw),
@@ -2046,6 +2122,7 @@ def run_daemon() -> None:
                         ax.set_title(f"ROI1 Waveform - Frame {frame_index} (len={len(roi1_curve)})")
                         ax.set_xlabel("Frame Index (relative)")
                         ax.set_ylabel("Gray Value (0-255)")
+                        ax.set_ylim(0, 100)
                         ax.legend(loc='upper right', fontsize=8)
                         ax.grid(True, alpha=0.3)
 

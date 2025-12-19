@@ -43,6 +43,9 @@ class SafePeakStatistics:
         self.hybrid_stats_data: List[Dict[str, Any]] = []
         self.hybrid_enabled: bool = False
 
+        # ROI1波峰唯一ID管理机制
+        self.processed_roi1_peak_ids: set = set()  # 已处理的ROI1波峰ID集合
+
         self.start_time = datetime.now()
         self.video_name = video_name
         self.is_batch_mode = is_batch_mode
@@ -197,6 +200,18 @@ class SafePeakStatistics:
 
                     for hybrid_peak in hybrid_peaks:
                         peak_start, peak_end = hybrid_peak['peak_interval']
+                        roi1_peak_id = hybrid_peak.get('roi1_peak_id', '')
+
+                        # 第一层去重：ROI1波峰唯一ID检查
+                        if roi1_peak_id and roi1_peak_id in self.processed_roi1_peak_ids:
+                            results.append({
+                                **hybrid_peak,
+                                "action": "skipped",
+                                "skip_reason": "duplicate_roi1_peak_id",
+                                "roi1_peak_id": roi1_peak_id
+                            })
+                            print(f"[统计系统] ROI1波峰ID {roi1_peak_id} 已处理过，跳过")
+                            continue
 
                         # 创建混合检测波峰数据
                         hybrid_peak_data = self._create_hybrid_peak_data(
@@ -206,7 +221,7 @@ class SafePeakStatistics:
                             threshold_used, roi1_threshold_used, bg_mean
                         )
 
-                        # 应用三层去重逻辑
+                        # 应用原有的三层去重逻辑
                         if self._is_duplicate_peak(hybrid_peak_data):
                             results.append({**hybrid_peak_data, "action": "skipped", "skip_reason": "duplicate_peak"})
                             continue
@@ -218,6 +233,10 @@ class SafePeakStatistics:
                         if self._is_invalid_peak_data(hybrid_peak_data):
                             results.append({**hybrid_peak_data, "action": "skipped", "skip_reason": "invalid_peak_data"})
                             continue
+
+                        # 记录已处理的ROI1波峰ID
+                        if roi1_peak_id:
+                            self.processed_roi1_peak_ids.add(roi1_peak_id)
 
                         # 混合检测数据通过去重验证，记录到统计系统
                         self._add_peak_to_memory(hybrid_peak_data)
@@ -452,6 +471,8 @@ class SafePeakStatistics:
             'peak_start_frame': start_frame,
             'peak_end_frame': end_frame,
             'peak_width_frames': end_frame - start_frame + 1,
+            'roi1_peak_id': hybrid_peak.get('roi1_peak_id', ''),
+            'roi1_peak_key': str(hybrid_peak.get('roi1_peak_key', '')),
 
             # ROI2增强信息
             'roi2_threshold_used': round(float(roi2_threshold_used), 3) if roi2_threshold_used is not None else 0.0,
