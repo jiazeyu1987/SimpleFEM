@@ -570,6 +570,12 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
     if processed_peaks is None:
         processed_peaks = {}
 
+    require_intersection = bool(config.get("require_intersection", True))
+    intersection_detected = bool(config.get("intersection_detected", True))
+    if require_intersection and not intersection_detected:
+        print("[混合检测] 当前帧未检测到绿线交点，跳过ROI1波峰检测（避免ROI2定位失效导致误报）")
+        return []
+
     buffer_start_frame_index = int(config.get("buffer_start_frame_index", 1))
 
     # 1. 使用ROI1数据进行波峰检测（ROI1独立阈值）
@@ -631,6 +637,9 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
         color_result = determine_roi2_color_in_interval(
             peak_start, peak_end, roi2_curve, config
         )
+        if not bool(color_result.get("roi2_valid", True)) and bool(config.get("skip_when_roi2_invalid", True)):
+            print(f"[混合检测] ROI2数据无效，跳过波峰[{peak_start}-{peak_end}] (ID:{peak_id})")
+            continue
 
         # 创建混合检测结果（包含ROI1唯一ID）
         hybrid_peak = {
@@ -678,6 +687,8 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
     color_threshold = config.get('roi2_color_threshold', 1.5)
     min_frames = config.get('minimum_roi2_frames', 15)
     min_variance = config.get('roi2_minimum_variance', 0.5)
+    roi2_min_gray = float(config.get("roi2_min_gray", 5.0))
+    roi2_max_gray = float(config.get("roi2_max_gray", 250.0))
     fallback_enabled = config.get('fallback_enabled', True)
 
     try:
@@ -690,6 +701,7 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                     'method': 'roi1_fallback',
                     'confidence': 0.0,
                     'frame_difference': 0.0,
+                    'roi2_valid': False,
                     'error': f'ROI2数据不足({roi2_interval_length} < {min_frames})，回退到ROI1'
                 }
             else:
@@ -698,6 +710,7 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                     'method': 'error',
                     'confidence': 0.0,
                     'frame_difference': 0.0,
+                    'roi2_valid': False,
                     'error': f'ROI2数据不足且未启用回退'
                 }
 
@@ -720,6 +733,23 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
 
         # 计算数据质量评分
         quality_info = calculate_roi2_data_quality(peak_start, peak_end, roi2_curve)
+        variance_val = float(quality_info.get("variance", 0.0))
+        mean_val = float(quality_info.get("mean_val", 0.0))
+        if variance_val < float(min_variance) or mean_val < roi2_min_gray or mean_val > roi2_max_gray:
+            return {
+                'color': 'red',
+                'method': 'roi2_invalid',
+                'confidence': 0.0,
+                'frame_difference': 0.0,
+                'threshold': color_threshold,
+                'pre_avg': pre_avg,
+                'post_avg': post_avg,
+                'roi2_valid': False,
+                'quality_score': quality_info.get('quality_score', 0.0),
+                'variance': variance_val,
+                'data_range': quality_info.get('data_range', 0.0),
+                'error': f'ROI2无效: mean={mean_val:.2f} (min={roi2_min_gray:.2f}, max={roi2_max_gray:.2f}), variance={variance_val:.4f} (min={float(min_variance):.4f})'
+            }
 
         return {
             'color': color,
@@ -729,6 +759,7 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
             'pre_avg': pre_avg,
             'post_avg': post_avg,
             'confidence': confidence,
+            'roi2_valid': True,
             'quality_score': quality_info['quality_score'],
             'variance': quality_info.get('variance', 0.0),
             'data_range': quality_info.get('data_range', 0.0)
@@ -741,6 +772,7 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                 'method': 'roi1_fallback',
                 'confidence': 0.0,
                 'frame_difference': 0.0,
+                'roi2_valid': False,
                 'error': f'ROI2计算错误({str(e)})，回退到ROI1'
             }
         else:
@@ -749,6 +781,7 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                 'method': 'error',
                 'confidence': 0.0,
                 'frame_difference': 0.0,
+                'roi2_valid': False,
                 'error': f'ROI2计算错误且未启用回退: {str(e)}'
             }
 
@@ -1626,7 +1659,12 @@ def run_daemon() -> None:
                             'minimum_roi2_frames': min_roi2_frames,
                             'roi2_minimum_variance': roi2_min_variance,
                             'roi2_color_threshold': diff_threshold,
-                            'fallback_enabled': fallback_enabled
+                            'fallback_enabled': fallback_enabled,
+                            'require_intersection': bool(hybrid_conf.get("require_intersection", True)),
+                            'intersection_detected': bool(intersection is not None),
+                            'skip_when_roi2_invalid': bool(data_quality_conf.get("skip_peaks_when_roi2_invalid", True)),
+                            'roi2_min_gray': float(data_quality_conf.get("roi2_min_gray", 5.0)),
+                            'roi2_max_gray': float(data_quality_conf.get("roi2_max_gray", 250.0)),
                         }
 
                         print(f"[混合检测] 开始分析 - ROI1曲线长度:{len(roi1_curve)}, ROI2曲线长度:{len(roi2_curve)}")
