@@ -383,7 +383,7 @@ def _sanitize_video_name(video_name: str) -> str:
     return sanitized or f"video_{int(time.time())}"
 
 
-def _create_video_folders(video_path: str, session_id: str, processing_mode: str, save_roi1: bool, save_roi2: bool, save_wave: bool, save_roi1_wave: bool = False) -> str:
+def _create_video_folders(video_path: str, session_id: str, processing_mode: str, save_roi1: bool, save_roi2: bool, save_roi3: bool, save_wave: bool, save_roi1_wave: bool = False) -> str:
     """创建每视频的文件夹结构"""
     if processing_mode == "video":
         # 批量模式：使用视频名称
@@ -398,16 +398,19 @@ def _create_video_folders(video_path: str, session_id: str, processing_mode: str
     # 创建子文件夹
     roi1_dir = os.path.join(tmp_root, "roi1")
     roi2_dir = os.path.join(tmp_root, "roi2")
+    roi3_dir = os.path.join(tmp_root, "roi3")
     wave_dir = os.path.join(tmp_root, "wave")
     wave1_dir = os.path.join(tmp_root, "wave1")
 
     # 根据配置创建目录
-    if save_roi1 or save_roi2 or save_wave or save_roi1_wave:
+    if save_roi1 or save_roi2 or save_roi3 or save_wave or save_roi1_wave:
         os.makedirs(tmp_root, exist_ok=True)
     if save_roi1:
         os.makedirs(roi1_dir, exist_ok=True)
     if save_roi2:
         os.makedirs(roi2_dir, exist_ok=True)
+    if save_roi3:
+        os.makedirs(roi3_dir, exist_ok=True)
     if save_wave:
         os.makedirs(wave_dir, exist_ok=True)
     if save_roi1_wave:
@@ -1114,9 +1117,14 @@ def run_daemon() -> None:
         roi2_config = config.get("roi_capture", {}).get("roi2_config", {})
         extension_params = roi2_config.get("extension_params", {})
 
+        # Load ROI3 configuration
+        roi3_config = config.get("roi_capture", {}).get("roi3_config", {})
+        roi3_extension_params = roi3_config.get("extension_params", {})
+
         data_processing = config.get("data_processing", {})
         save_roi1 = bool(data_processing.get("save_roi1", False))
         save_roi2 = bool(data_processing.get("save_roi2", False))
+        save_roi3 = bool(data_processing.get("save_roi3", False))
         save_wave = bool(data_processing.get("save_wave", False))
         save_roi1_wave = bool(data_processing.get("save_roi1_wave", False))
         # only_delect == True: save ROI1/ROI2/wave only when peaks are detected
@@ -1214,6 +1222,10 @@ def run_daemon() -> None:
         roi1_protection_end_time: float = 0.0
         roi1_consecutive_below_threshold: int = 0
         roi1_last_waveform_time: float = 0.0
+
+        # ROI3 independent buffer (same structure as ROI2)
+        roi3_gray_buffer: Deque[float] = deque(maxlen=100)
+
         # Initialize ROI1 threshold used so hybrid detection can reference it
         # before the per-frame ROI1 adaptive-threshold block runs.
         roi1_threshold_used: float = max(roi1_threshold, roi1_threshold_minimum)
@@ -1233,12 +1245,14 @@ def run_daemon() -> None:
                     processing_mode,
                     save_roi1,
                     save_roi2,
+                    save_roi3,
                     save_wave,
                     save_roi1_wave
                 )
                 # 关键修复：更新ROI保存路径变量
                 roi1_dir = os.path.join(tmp_root, "roi1")
                 roi2_dir = os.path.join(tmp_root, "roi2")
+                roi3_dir = os.path.join(tmp_root, "roi3")
                 wave_dir = os.path.join(tmp_root, "wave")
                 wave1_dir = os.path.join(tmp_root, "wave1")
             else:
@@ -1259,14 +1273,17 @@ def run_daemon() -> None:
             tmp_root = os.path.join(BASE_DIR, "tmp", session_start)
             roi1_dir = os.path.join(tmp_root, "roi1")
             roi2_dir = os.path.join(tmp_root, "roi2")
+            roi3_dir = os.path.join(tmp_root, "roi3")
             wave_dir = os.path.join(tmp_root, "wave")
 
-            if save_roi1 or save_roi2 or save_wave:
+            if save_roi1 or save_roi2 or save_roi3 or save_wave:
                 os.makedirs(tmp_root, exist_ok=True)
             if save_roi1:
                 os.makedirs(roi1_dir, exist_ok=True)
             if save_roi2:
                 os.makedirs(roi2_dir, exist_ok=True)
+            if save_roi3:
+                os.makedirs(roi3_dir, exist_ok=True)
             if save_wave:
                 os.makedirs(wave_dir, exist_ok=True)
 
@@ -1437,6 +1454,7 @@ def run_daemon() -> None:
                                     processing_mode,
                                     save_roi1,
                                     save_roi2,
+                                    save_roi3,
                                     save_wave,
                                     save_roi1_wave
                                 )
@@ -1444,6 +1462,7 @@ def run_daemon() -> None:
                                 # 关键修复：更新ROI保存路径变量
                                 roi1_dir = os.path.join(tmp_root, "roi1")
                                 roi2_dir = os.path.join(tmp_root, "roi2")
+                                roi3_dir = os.path.join(tmp_root, "roi3")
                                 wave_dir = os.path.join(tmp_root, "wave")
                                 wave1_dir = os.path.join(tmp_root, "wave1")
 
@@ -1568,6 +1587,21 @@ def run_daemon() -> None:
                     roi2_image = roi1_image.crop((rx1, ry1, rx2, ry2))
                     roi2_gray = compute_average_gray(roi2_image)
                     gray_buffer.append(roi2_gray)
+
+                    # ROI3 extraction (independent from ROI2)
+                    roi3_gray: Optional[float] = None
+                    roi3_image: Optional[Image.Image] = None
+                    if roi3_extension_params:
+                        roi3_region = compute_roi2_region(
+                            (roi1_width, roi1_height),
+                            (center_x, center_y),
+                            roi3_extension_params,
+                        )
+                        if roi3_region is not None:
+                            r3x1, r3y1, r3x2, r3y2 = roi3_region
+                            roi3_image = roi1_image.crop((r3x1, r3y1, r3x2, r3y2))
+                            roi3_gray = compute_average_gray(roi3_image)
+                            roi3_gray_buffer.append(roi3_gray)
 
                     # ROI1 gray value calculation (independent from ROI2)
                     roi1_gray: Optional[float] = None
@@ -1980,6 +2014,14 @@ def run_daemon() -> None:
                     except Exception:
                         pass
 
+                # Save ROI3 image if enabled and available
+                if should_save and save_roi3 and roi3_image is not None and roi3_dir:
+                    try:
+                        roi3_path = os.path.join(roi3_dir, f"roi3_{frame_index:06d}{video_time_str}.png")
+                        roi3_image.save(roi3_path)
+                    except Exception:
+                        pass
+
                 # Save wave plot (curve before detection, but annotated with detection result)
                 if should_save and save_wave and gray_buffer:
                     try:
@@ -1992,6 +2034,12 @@ def run_daemon() -> None:
                         fig, ax = plt.subplots(figsize=(8, 3))
                         x = list(range(len(curve)))
                         ax.plot(x, curve, color="black", linewidth=1)
+
+                        # Add ROI3 purple curve if buffer has data
+                        if roi3_gray_buffer:
+                            x3 = list(range(len(roi3_gray_buffer)))
+                            ax.plot(x3, list(roi3_gray_buffer), color="purple", linewidth=1, label="ROI3")
+                            ax.legend()
 
                         # Draw session-wide background mean (adaptive threshold baseline)
                         if bg_count > 0:

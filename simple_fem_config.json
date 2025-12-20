@@ -5,6 +5,7 @@
     "_comment": "数据保存/日志策略（only_delect=true 表示只有检测到波峰才保存/记录）。",
     "save_roi1": true,
     "save_roi2": true,
+    "save_roi3": true,
     "save_wave": true,
     "save_roi1_wave": true,
     "only_delect": false
@@ -37,6 +38,16 @@
         "right": 40,
         "top": 50,
         "bottom": 30
+      }
+    },
+    "roi3_config": {
+      "_comment": "ROI3 从 ROI1 中裁剪：以绿色交点为中心，按 extension_params 扩展得到 ROI3。",
+      "extension_params": {
+        "_comment": "ROI3 扩展像素：left/right/top/bottom 表示相对交点向四个方向扩展的像素数。",
+        "left": 60,
+        "right": 60,
+        "top": 120,
+        "bottom": 120
       }
     }
   },
