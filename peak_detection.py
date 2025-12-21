@@ -11,7 +11,7 @@ Design goals:
   * No white state is used any more.
 """
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import statistics
 
 # Optional external "improved" implementation
@@ -91,6 +91,29 @@ def classify_peak_color(
         All other peaks.
     """
     return "green" if frameDifference >= differenceThreshold else "red"
+
+
+def classify_peak_color_with_roi3_override(
+    frameDifference: float,
+    differenceThreshold: float = 1.5,
+    roi3_peak_max: Optional[float] = None,
+    roi3_override_threshold: float = 115.0,
+    roi3_override_enabled: bool = True,
+) -> str:
+    """
+    Enhanced peak classification with ROI3 override logic.
+
+    Returns: "green" or "red" after ROI3 override consideration
+    """
+    # Initial classification using existing logic
+    base_color = classify_peak_color(frameDifference, differenceThreshold)
+
+    # ROI3 override logic only applies to RED classifications
+    if (roi3_override_enabled and base_color == "red" and
+        roi3_peak_max is not None and roi3_peak_max > roi3_override_threshold):
+        return "green"  # ROI3 override applied
+
+    return base_color  # No override
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,8 @@
   "video_processing": {
     "_comment": "processing_mode=video 时生效：从本地视频文件夹依次读取所有视频文件作为输入。video_path可以是单个视频文件或视频文件夹路径。",
     "video_path": "video",
-    "loop_enabled": false
+    "loop_enabled": false,
+    "processing_frame_rate": ""
   },
   "roi_capture": {
     "_comment": "ROI1/ROI2 截图参数：ROI1 是大区域，ROI2 是围绕绿色交点的局部区域。",
@@ -44,12 +45,13 @@
       "_comment": "ROI3 从 ROI1 中裁剪：以绿色交点为中心，按 extension_params 扩展得到 ROI3。",
       "extension_params": {
         "_comment": "ROI3 扩展像素：left/right/top/bottom 表示相对交点向四个方向扩展的像素数。",
-        "left": 60,
-        "right": 60,
+        "left": 64,
+        "right": 64,
         "top": 120,
         "bottom": 120
       }
-    }
+    },
+    "save_roi3": false
   },
   "peak_detection": {
     "_comment": "波峰检测：先用阈值识别连续高位区间（波峰），再用 pre/post 均值差判定绿/红；支持自适应阈值（基于背景均值）。",
@@ -108,6 +110,15 @@
       "min_green_prominence": 0.3,
       "red_detection_variance": 0.4
     },
+    "roi3_override": {
+      "_comment": "ROI3 override logic: If ROI2 classifies as RED but ROI3 peak max > threshold, change to GREEN",
+      "enabled": true,
+      "_comment_enabled": "Enable/disable ROI3 override functionality",
+      "threshold": 111.0,
+      "_comment_threshold": "ROI3 peak max value threshold for override (default 111)",
+      "require_roi3_data": true,
+      "_comment_require_roi3_data": "Require valid ROI3 data for override (false = skip if ROI3 unavailable)"
+    },
     "tracking": {
       "_comment": "生命周期追踪参数（目前主流程未使用，预留）。",
       "enable_lifecycle_tracking": true,
@@ -163,7 +174,11 @@
     "_comment_cleanup_tmp": "是否清理tmp文件夹：删除临时文件。",
     "cleanup_logs": true,
     "_comment_cleanup_logs": "是否清理logs文件夹：删除日志文件。",
-    "directories_to_clean": ["export", "tmp", "logs"],
+    "directories_to_clean": [
+      "export",
+      "tmp",
+      "logs"
+    ],
     "_comment_directories_to_clean": "自定义清理目录列表：可修改要清理的文件夹名称。"
   },
   "deduplication": {
@@ -193,7 +208,10 @@
       "post_peak": 10,
       "_comment_post_peak": "ROI2波峰后取平均值的帧数"
     },
-    "roi1_peak_width_range": [5, 100],
+    "roi1_peak_width_range": [
+      5,
+      100
+    ],
     "_comment_roi1_peak_width_range": "ROI1波峰宽度范围(帧数) [最小, 最大]",
     "data_quality": {
       "_comment": "数据质量检查参数",
@@ -220,5 +238,19 @@
     },
     "stability_threshold": 8.0,
     "_comment_stability_threshold": "稳定阈值(仅在algorithm='ema'时使用)"
+  },
+  "roi3_config": {
+    "extension_params": {
+      "left": "",
+      "right": "",
+      "top": "",
+      "bottom": ""
+    },
+    "save_roi3": false
+  },
+  "roi3_override": {
+    "enabled": false,
+    "threshold": "",
+    "require_roi3_data": false
   }
 }

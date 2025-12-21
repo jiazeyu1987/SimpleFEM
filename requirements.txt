@@ -1,0 +1,29 @@
+# Core dependencies for SimpleFEM ROI detection and vein tracking system
+# Compatible with Python 3.8+
+# Install with: pip install -r requirements.txt
+
+# Required dependencies - must be installed
+numpy>=1.21.0
+opencv-python>=4.5.0
+Pillow>=8.3.0
+matplotlib>=3.5.0
+
+# Optional dependencies - uncomment as needed
+# For memory monitoring and performance tracking:
+# psutil>=5.8.0
+
+# For creating standalone executable:
+# pyinstaller>=4.5.0
+
+# For advanced statistical analysis:
+# scipy>=1.7.0
+
+# For advanced data export and CSV handling:
+# pandas>=1.3.0
+
+# For testing framework:
+# pytest>=6.2.0
+# pytest-cov>=2.12.0
+
+# For Python < 3.7 compatibility:
+# dataclasses; python_version<"3.7"

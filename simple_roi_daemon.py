@@ -1150,6 +1150,12 @@ def run_daemon() -> None:
         stability_frames = int(protection_conf.get("stability_frames", 5))
         waveform_trigger_enabled = bool(protection_conf.get("waveform_trigger_enabled", True))
 
+        # ROI3 override parameters
+        roi3_override_conf = peak_conf.get("roi3_override", {})
+        roi3_override_enabled = bool(roi3_override_conf.get("enabled", False))
+        roi3_override_threshold = float(roi3_override_conf.get("threshold", 115.0))
+        require_roi3_data = bool(roi3_override_conf.get("require_roi3_data", True))
+
         min_region_length = int(peak_conf.get("min_region_length", 1))
 
         # ROI1 configuration parameters (independent from ROI2)
@@ -1602,6 +1608,11 @@ def run_daemon() -> None:
                             roi3_image = roi1_image.crop((r3x1, r3y1, r3x2, r3y2))
                             roi3_gray = compute_average_gray(roi3_image)
                             roi3_gray_buffer.append(roi3_gray)
+                            print(f"[DEBUG] ROI3 captured: frame={frame_index}, gray={roi3_gray:.2f}, buffer_len={len(roi3_gray_buffer)}")
+                        else:
+                            print(f"[DEBUG] ROI3 extraction failed: frame={frame_index}, intersection={intersection}, roi3_extension_params={roi3_extension_params}")
+                    else:
+                        print(f"[DEBUG] ROI3 extension params not available")
 
                     # ROI1 gray value calculation (independent from ROI2)
                     roi1_gray: Optional[float] = None
@@ -1895,7 +1906,11 @@ def run_daemon() -> None:
                             hybrid_enabled=hybrid_enabled,
                             hybrid_peaks=hybrid_peaks,
                             roi1_curve=roi1_curve_for_stats,
-                            roi1_threshold_used=roi1_threshold_used
+                            roi1_threshold_used=roi1_threshold_used,
+                            # ROI3 override参数
+                            roi3_curve=list(roi3_gray_buffer) if roi3_gray_buffer else [],
+                            roi3_override_enabled=roi3_override_enabled,
+                            roi3_override_threshold=roi3_override_threshold
                         )
 
                 except Exception as e:
