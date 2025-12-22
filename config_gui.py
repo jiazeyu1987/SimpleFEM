@@ -7,7 +7,7 @@ SimpleFEM配置管理器UI
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, filedialog
 import json
 import os
 from pathlib import Path
@@ -36,6 +36,7 @@ class SimpleFEMConfigGUI:
         self.y_zoom_factor = 1.0  # Y轴缩放因子 (1.0 = 原始大小)
         self.y_min_zoom = 0.1    # 最小缩放因子 (10%)
         self.y_max_zoom = 10.0   # 最大缩放因子 (1000%)
+        self.roi1_zoom_factor = tk.DoubleVar(value=1.0)  # ROI1画布缩放因子
         self.y_zoom_step = 0.1   # 每次滚轮缩放步长
 
         # ROI1图片导航相关
@@ -502,6 +503,14 @@ class SimpleFEMConfigGUI:
         self.roi_canvas.bind('<Motion>', self.on_roi_canvas_mouse_motion)
         self.roi_canvas.bind('<Leave>', self.on_roi_canvas_mouse_leave)
 
+        # 绑定ROI1画布鼠标滚轮事件，用于缩放
+        self.roi_canvas.bind("<MouseWheel>", self.on_roi_canvas_mousewheel)
+        self.roi_canvas.bind("<Control-MouseWheel>", self.on_roi_canvas_mousewheel_reset)  # Ctrl+滚轮重置
+        self.roi_canvas.bind("<Button-4>", self.on_roi_canvas_mousewheel)  # Linux 向上滚轮
+        self.roi_canvas.bind("<Button-5>", self.on_roi_canvas_mousewheel)  # Linux 向下滚轮
+        self.roi_canvas.bind("<Control-Button-4>", self.on_roi_canvas_mousewheel_reset)  # Linux Ctrl+向上滚轮重置
+        self.roi_canvas.bind("<Control-Button-5>", self.on_roi_canvas_mousewheel_reset)  # Linux Ctrl+向下滚轮重置
+
         # 在ROI1画布下方添加固定的像素信息显示框
         pixel_info_frame = ttk.Frame(roi_frame)
         pixel_info_frame.pack(fill=tk.X, pady=(5, 0))
@@ -793,7 +802,7 @@ class SimpleFEMConfigGUI:
                     self.config_data = json.load(f)
             else:
                 self.config_data = {}
-                messagebox.showwarning("警告", f"配置文件 {self.config_path} 不存在，将创建新配置")
+                print(f"[WARNING] 配置文件 {self.config_path} 不存在，将创建新配置")
 
             # 将配置数据加载到UI控件
             self.load_to_widgets()
@@ -801,7 +810,9 @@ class SimpleFEMConfigGUI:
             self.status_var.set(f"配置已加载: {self.config_path}")
 
         except Exception as e:
-            messagebox.showerror("错误", f"加载配置文件失败: {str(e)}")
+            print(f"[ERROR] 加载配置文件失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
             self.status_var.set("加载失败")
 
     def load_to_widgets(self):
@@ -882,10 +893,12 @@ class SimpleFEMConfigGUI:
                 json.dump(self.config_data, f, indent=2, ensure_ascii=False)
 
             self.status_var.set(f"配置已保存: {self.config_path}")
-            messagebox.showinfo("成功", "配置已成功保存!")
+            print("[INFO] 配置已成功保存!")
 
         except Exception as e:
-            messagebox.showerror("错误", f"保存配置文件失败: {str(e)}")
+            print(f"[ERROR] 保存配置文件失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
             self.status_var.set("保存失败")
 
     def save_as(self):
@@ -905,10 +918,12 @@ class SimpleFEMConfigGUI:
                     json.dump(self.config_data, f, indent=2, ensure_ascii=False)
 
                 self.status_var.set(f"配置已保存: {filename}")
-                messagebox.showinfo("成功", f"配置已保存到: {filename}")
+                print(f"[INFO] 配置已保存到: {filename}")
 
         except Exception as e:
-            messagebox.showerror("错误", f"另存为失败: {str(e)}")
+            print(f"[ERROR] 另存为失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
             self.status_var.set("另存为失败")
 
     def collect_from_widgets(self):
@@ -1008,14 +1023,17 @@ class SimpleFEMConfigGUI:
                 # 显示序列信息
                 if len(self.current_image_sequence) > 1:
                     sequence_info = f"序列: {len(self.current_image_sequence)}张图片 (按D/A或→/←切换)"
-                    self.status_var.set(f"ROI1图片已导入: {os.path.basename(filename)} | {sequence_info}")
+                    zoom_info = f" | Y轴缩放: {int(self.y_zoom_factor * 100)}%" if self.y_zoom_factor != 1.0 else ""
+                    self.status_var.set(f"ROI1图片已导入: {os.path.basename(filename)} | {sequence_info}{zoom_info}")
                     print(f"[INFO] {sequence_info}")
                 else:
                     self.status_var.set(f"ROI1图片已导入: {os.path.basename(filename)}")
                     print(f"[INFO] 未检测到有效的图片序列")
 
             except Exception as e:
-                messagebox.showerror("错误", f"导入图片失败: {str(e)}")
+                print(f"[ERROR] 导入图片失败: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 self.status_var.set("图片导入失败")
 
     def clear_roi1_image(self):
@@ -1143,11 +1161,14 @@ class SimpleFEMConfigGUI:
         # 计算缩放比例以适应画布
         scale_x = (canvas_width - 20) / roi1_width
         scale_y = (canvas_height - 20) / roi1_height
-        scale = min(scale_x, scale_y, 1.0)  # 不放大图片
+        base_scale = min(scale_x, scale_y, 1.0)  # 不放大图片的基础缩放
+
+        # 应用ROI1缩放因子
+        display_scale = base_scale * self.roi1_zoom_factor.get()
 
         # 缩放ROI1图片
-        display_width = int(roi1_width * scale)
-        display_height = int(roi1_height * scale)
+        display_width = int(roi1_width * display_scale)
+        display_height = int(roi1_height * display_scale)
         display_image = roi1_region.resize((display_width, display_height), Image.Resampling.LANCZOS)
 
         # 转换为PhotoImage并显示
@@ -1180,19 +1201,19 @@ class SimpleFEMConfigGUI:
         roi3_bottom = center_y + roi_config['roi3'][3]
 
         # 转换ROI2、ROI3坐标到显示坐标系
-        roi2_img_left = (roi2_left * scale) + x_offset
-        roi2_img_top = (roi2_top * scale) + y_offset
-        roi2_img_right = (roi2_right * scale) + x_offset
-        roi2_img_bottom = (roi2_bottom * scale) + y_offset
+        roi2_img_left = (roi2_left * display_scale) + x_offset
+        roi2_img_top = (roi2_top * display_scale) + y_offset
+        roi2_img_right = (roi2_right * display_scale) + x_offset
+        roi2_img_bottom = (roi2_bottom * display_scale) + y_offset
 
-        roi3_img_left = (roi3_left * scale) + x_offset
-        roi3_img_top = (roi3_top * scale) + y_offset
-        roi3_img_right = (roi3_right * scale) + x_offset
-        roi3_img_bottom = (roi3_bottom * scale) + y_offset
+        roi3_img_left = (roi3_left * display_scale) + x_offset
+        roi3_img_top = (roi3_top * display_scale) + y_offset
+        roi3_img_right = (roi3_right * display_scale) + x_offset
+        roi3_img_bottom = (roi3_bottom * display_scale) + y_offset
 
         # 交点坐标（ROI1中心点在显示坐标系中的位置）
-        intersection_x = (center_x * scale) + x_offset
-        intersection_y = (center_y * scale) + y_offset
+        intersection_x = (center_x * display_scale) + x_offset
+        intersection_y = (center_y * display_scale) + y_offset
 
         # ROI1边界（显示坐标，即背景图片边界）
         roi1_img_left = x_offset
@@ -1259,7 +1280,7 @@ class SimpleFEMConfigGUI:
         # 在ROI1区域左下角显示图片信息
         self.roi_canvas.create_text(
             roi1_img_left + 5, roi1_img_bottom - 5,
-            text=f"原图: {original_img_width}x{original_img_height} | ROI1: {roi1_width}x{roi1_height} | 缩放: {scale:.2f}x",
+            text=f"原图: {original_img_width}x{original_img_height} | ROI1: {roi1_width}x{roi1_height} | 缩放: {display_scale:.2f}x",
             fill='darkgreen', font=('Arial', 8), anchor='sw'
         )
 
@@ -1608,27 +1629,116 @@ class SimpleFEMConfigGUI:
                 return
 
             # 计算新的缩放因子
+            current_zoom = self.roi1_zoom_factor.get()
             if delta > 0:  # 向上滚动，放大
-                new_zoom = self.y_zoom_factor * (1 + self.y_zoom_step)
+                new_zoom = current_zoom * (1 + self.y_zoom_step)
             else:  # 向下滚动，缩小
-                new_zoom = self.y_zoom_factor * (1 - self.y_zoom_step)
+                new_zoom = current_zoom * (1 - self.y_zoom_step)
 
             # 限制缩放范围
             new_zoom = max(self.y_min_zoom, min(self.y_max_zoom, new_zoom))
 
             # 如果缩放因子发生变化，更新显示
-            if new_zoom != self.y_zoom_factor:
-                self.y_zoom_factor = new_zoom
-                print(f"[INFO] Y轴缩放: {self.y_zoom_factor:.2f}x")
+            if abs(new_zoom - current_zoom) > 0.001:
+                self.roi1_zoom_factor.set(new_zoom)
+                zoom_percentage = int(new_zoom * 100)
+                print(f"[INFO] ROI1缩放: {new_zoom:.2f}x ({zoom_percentage}%)")
 
-                # 重新绘制曲线（如果有ROI图片）
+                # 更新状态栏显示缩放信息
+                self.status_var.set(f"ROI1缩放: {zoom_percentage}%")
+
+                # 更新ROI可视化（包括图片和叠加）
                 if self.roi1_image:
-                    roi_config = self.get_roi_config_values()
-                    original_img_width, original_img_height = self.roi1_image.size
-                    self.draw_grayscale_curves(roi_config, original_img_width, original_img_height)
+                    self.update_roi_visualization()
+                    # 如果有叠加，也要更新叠加显示
+                    if hasattr(self, 'heatmap_mode') and self.heatmap_mode and self.heat_map is not None:
+                        self.update_heat_map_overlay()
+                    elif hasattr(self, 'overlay_enabled') and self.overlay_enabled.get() and hasattr(self, 'current_overlay_image') and self.current_overlay_image:
+                        self.update_overlay()
+
+                # 重新绘制曲线
+                roi_config = self.get_roi_config_values()
+                original_img_width, original_img_height = self.roi1_image.size
+                self.draw_grayscale_curves(roi_config, original_img_width, original_img_height)
 
         except Exception as e:
             print(f"[ERROR] 鼠标滚轮事件处理失败: {e}")
+
+    def on_roi_canvas_mousewheel(self, event):
+        """处理ROI1画布的鼠标滚轮事件，用于缩放图片"""
+        try:
+            # 确保有ROI1图片
+            if not self.roi1_image:
+                return
+
+            # Linux系统通过event.delta识别滚轮方向
+            if hasattr(event, 'delta'):
+                # Windows系统: event.delta
+                delta = event.delta
+            else:
+                # Linux系统: event.num属性
+                if hasattr(event, 'num'):
+                    delta = -event.num  # Linux中num的正负与Windows相反
+                else:
+                    return  # 如果无法获取滚轮信息，则返回
+
+            # 获取当前ROI1缩放因子
+            current_zoom = self.roi1_zoom_factor.get()
+
+            # 根据滚轮方向决定放大或缩小
+            if delta > 0:
+                # 向上滚轮 - 放大
+                new_zoom = current_zoom * (1 + self.y_zoom_step)
+            else:
+                # 向下滚轮 - 缩小
+                new_zoom = current_zoom * (1 - self.y_zoom_step)
+
+            # 限制缩放范围
+            new_zoom = max(self.y_min_zoom, min(self.y_max_zoom, new_zoom))
+
+            # 如果缩放因子发生变化，更新显示
+            if abs(new_zoom - current_zoom) > 0.001:
+                self.roi1_zoom_factor.set(new_zoom)
+                zoom_percentage = int(new_zoom * 100)
+                print(f"[INFO] ROI1缩放: {new_zoom:.2f}x ({zoom_percentage}%)")
+
+                # 更新状态栏显示缩放信息
+                self.status_var.set(f"ROI1缩放: {zoom_percentage}%")
+
+                # 更新ROI可视化（包括图片和叠加）
+                if self.roi1_image:
+                    self.update_roi_visualization()
+                    # 如果有叠加，也要更新叠加显示
+                    if hasattr(self, 'heatmap_mode') and self.heatmap_mode and self.heat_map is not None:
+                        self.update_heat_map_overlay()
+                    elif hasattr(self, 'overlay_enabled') and self.overlay_enabled.get() and hasattr(self, 'current_overlay_image') and self.current_overlay_image:
+                        self.update_overlay()
+
+        except Exception as e:
+            print(f"[ERROR] ROI1画布鼠标滚轮事件处理失败: {e}")
+
+    def on_roi_canvas_mousewheel_reset(self, event):
+        """处理ROI1画布的Ctrl+滚轮重置缩放"""
+        try:
+            current_zoom = self.roi1_zoom_factor.get()
+            if abs(current_zoom - 1.0) > 0.001:
+                self.roi1_zoom_factor.set(1.0)
+                print(f"[INFO] ROI1缩放已重置: 1.00x")
+
+                # 更新状态栏
+                self.status_var.set("ROI1缩放已重置")
+
+                # 更新ROI可视化
+                if self.roi1_image:
+                    self.update_roi_visualization()
+                    # 更新叠加显示
+                    if hasattr(self, 'heatmap_mode') and self.heatmap_mode and self.heat_map is not None:
+                        self.update_heat_map_overlay()
+                    elif hasattr(self.overlay_enabled) and self.overlay_enabled.get() and hasattr(self, 'current_overlay_image') and self.current_overlay_image:
+                        self.update_overlay()
+
+        except Exception as e:
+            print(f"[ERROR] ROI1画布缩放重置失败: {e}")
 
     def on_curve_canvas_mousewheel_reset(self, event):
         """重置Y轴缩放为默认值"""
@@ -1670,11 +1780,12 @@ class SimpleFEMConfigGUI:
             # 计算图片在画布中的显示区域（考虑缩放和居中）
             scale_x = canvas_width / img_width
             scale_y = canvas_height / img_height
-            scale = min(scale_x, scale_y)  # 保持宽高比
+            base_scale = min(scale_x, scale_y, 1.0)  # 基础缩放，不放大
+            display_scale = base_scale * self.y_zoom_factor  # 应用用户缩放
 
             # 计算图片在画布中的实际显示区域
-            display_width = img_width * scale
-            display_height = img_height * scale
+            display_width = img_width * display_scale
+            display_height = img_height * display_scale
             offset_x = (canvas_width - display_width) / 2
             offset_y = (canvas_height - display_height) / 2
 
@@ -1683,8 +1794,8 @@ class SimpleFEMConfigGUI:
                 event.y >= offset_y and event.y < offset_y + display_height):
 
                 # 将画布坐标转换为图片坐标
-                img_x = int((event.x - offset_x) / scale)
-                img_y = int((event.y - offset_y) / scale)
+                img_x = int((event.x - offset_x) / display_scale)
+                img_y = int((event.y - offset_y) / display_scale)
 
                 # 确保坐标在图片范围内
                 img_x = max(0, min(img_x, img_width - 1))
@@ -1949,7 +2060,7 @@ class SimpleFEMConfigGUI:
         """处理热力图显示按钮点击"""
         try:
             if not self.roi1_image:
-                messagebox.showwarning("警告", "请先导入ROI1图像")
+                print("[WARNING] 请先导入ROI1图像")
                 return
 
             self.status_var.set("正在生成热力图...")
@@ -1958,13 +2069,13 @@ class SimpleFEMConfigGUI:
             # 获取ROI配置
             roi_config = self.get_roi_config_values()
             if not roi_config.get('roi3'):
-                messagebox.showwarning("警告", "请先配置ROI3扩展参数")
+                print("[WARNING] 请先配置ROI3扩展参数")
                 return
 
             # 提取ROI3图像
             roi3_image, roi3_coords = self.extract_roi3_from_roi1(self.roi1_image, roi_config)
             if roi3_image is None:
-                messagebox.showerror("错误", "ROI3提取失败")
+                print("[ERROR] ROI3提取失败")
                 return
 
             # 生成热力图
@@ -1972,7 +2083,6 @@ class SimpleFEMConfigGUI:
             self.heat_map = self.apply_heat_map_extraction(roi3_image)
             if self.heat_map is None:
                 print("[ERROR] 热力图生成失败")
-                messagebox.showerror("错误", "热力图生成失败")
                 return
 
             print(f"[DEBUG] 热力图生成成功: {self.heat_map.shape}")
@@ -1998,7 +2108,9 @@ class SimpleFEMConfigGUI:
             self.status_var.set("热力图显示完成")
 
         except Exception as e:
-            messagebox.showerror("错误", f"热力图处理失败: {e}")
+            print(f"[ERROR] 热力图处理失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     def on_heatmap_clear(self):
         """处理清除热力图按钮点击"""
@@ -2405,15 +2517,22 @@ class SimpleFEMConfigGUI:
 
                 scale_x = (canvas_width - 20) / roi1_width
                 scale_y = (canvas_height - 20) / roi1_height
-                scale = min(scale_x, scale_y, 1.0)
+                base_scale = min(scale_x, scale_y, 1.0)
+                scale = base_scale * self.roi1_zoom_factor.get()
 
                 x_offset = (canvas_width - roi1_width * scale) // 2
                 y_offset = (canvas_height - roi1_height * scale) // 2
 
-                # 转换叠加图像为PhotoImage
-                overlay_photo = ImageTk.PhotoImage(self.current_overlay_image)
+                # 缩放叠加图像以匹配ROI1的缩放
+                scaled_overlay = self.current_overlay_image.resize(
+                    (int(roi1_width * scale), int(roi1_height * scale)),
+                    Image.Resampling.LANCZOS
+                )
 
-                # 在画布上绘制叠加
+                # 转换缩放后的叠加图像为PhotoImage
+                overlay_photo = ImageTk.PhotoImage(scaled_overlay)
+
+                # 在画布上绘制叠加（居中显示）
                 self.roi_canvas.create_image(
                     canvas_width // 2, canvas_height // 2,
                     image=overlay_photo,
@@ -2551,7 +2670,8 @@ class SimpleFEMConfigGUI:
 
             # 更新状态栏
             sequence_info = f" | 序列: {index+1}/{len(self.current_image_sequence)}"
-            self.status_var.set(f"ROI1图片已加载: {os.path.basename(new_file)}{sequence_info} (按D/A或→/←切换)")
+            zoom_info = f" | Y轴缩放: {int(self.y_zoom_factor * 100)}%" if self.y_zoom_factor != 1.0 else ""
+            self.status_var.set(f"ROI1图片已加载: {os.path.basename(new_file)}{sequence_info}{zoom_info} (按D/A或→/←切换)")
 
             print(f"[INFO] 加载图片: {os.path.basename(new_file)} ({index+1}/{len(self.current_image_sequence)})")
             return True
