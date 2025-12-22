@@ -259,6 +259,12 @@ def detect_white_peaks_by_threshold_improved(
     result: List[Tuple[int, int, float]] = []
     for s, e in raw:
         frame_diff = calculate_frame_difference(curve, s, e, avgFrames=avgFrames)
+
+        # Filter out error data: if |frame_diff| > 15, consider it as noise/signal error
+        if abs(frame_diff) > 15.0:
+            # Skip this peak as it's considered erroneous data
+            continue
+
         result.append((s, e, frame_diff))
 
     return result

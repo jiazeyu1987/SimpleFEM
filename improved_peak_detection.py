@@ -76,6 +76,29 @@ class PeakLifecycleTracker:
             start, end, values = peak_data
             center = (start + end) // 2
 
+            # 计算frame_diff用于错误数据过滤
+            if len(values) >= 2:
+                # 使用与主算法相同的计算方法
+                try:
+                    # 需要传入完整的curve数据，但这里我们只有values
+                    # 使用values的均值变化来模拟frame_diff计算
+                    if len(values) >= 10:
+                        mid = len(values) // 2
+                        pre_avg = sum(values[:mid]) / mid
+                        post_avg = sum(values[mid:]) / (len(values) - mid)
+                        frame_diff = post_avg - pre_avg
+                    else:
+                        # 对于较短的values，使用简单的首尾差值
+                        frame_diff = values[-1] - values[0]
+
+                    # Filter out error data: if |frame_diff| > 15, consider it as noise/signal error
+                    if abs(frame_diff) > 15.0:
+                        # Skip this peak as it's considered erroneous data
+                        continue
+                except:
+                    # 如果计算失败，保留峰（保守处理）
+                    pass
+
             if center in matched_peaks:
                 # 更新现有峰
                 peak_id = matched_peaks[center]

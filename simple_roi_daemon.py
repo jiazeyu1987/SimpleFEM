@@ -640,6 +640,12 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
         color_result = determine_roi2_color_in_interval(
             peak_start, peak_end, roi2_curve, config
         )
+
+        # 检查是否被frame_diff过滤掉
+        if color_result.get("method") == "error_filtered":
+            print(f"[混合检测] frame_diff异常被过滤，跳过波峰[{peak_start}-{peak_end}] (ID:{peak_id}): {color_result.get('error', '未知错误')}")
+            continue
+
         if not bool(color_result.get("roi2_valid", True)) and bool(config.get("skip_when_roi2_invalid", True)):
             print(f"[混合检测] ROI2数据无效，跳过波峰[{peak_start}-{peak_end}] (ID:{peak_id})")
             continue
@@ -729,6 +735,21 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
 
         # 颜色判定：基于前后差异
         frame_difference = post_avg - pre_avg
+
+        # Filter out error data: if |frame_diff| > 15, consider it as noise/signal error
+        if abs(frame_difference) > 15.0:
+            return {
+                'color': 'red',  # 标记为红色但会被后续过滤
+                'method': 'error_filtered',
+                'confidence': 0.0,
+                'frame_difference': frame_difference,
+                'threshold': color_threshold,
+                'pre_avg': pre_avg,
+                'post_avg': post_avg,
+                'roi2_valid': False,
+                'error': f'frame_difference异常(|{frame_difference:.1f}| > 15)，判定为错误数据',
+            }
+
         color = "green" if frame_difference >= color_threshold else "red"
 
         # 计算置信度
