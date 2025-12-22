@@ -45,10 +45,10 @@
       "_comment": "ROI3 从 ROI1 中裁剪：以绿色交点为中心，按 extension_params 扩展得到 ROI3。",
       "extension_params": {
         "_comment": "ROI3 扩展像素：left/right/top/bottom 表示相对交点向四个方向扩展的像素数。",
-        "left": 64,
-        "right": 64,
-        "top": 120,
-        "bottom": 120
+        "left": 40,
+        "right": 40,
+        "top": 20,
+        "bottom": 250
       }
     },
     "save_roi3": false

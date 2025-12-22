@@ -17,8 +17,11 @@ import numpy as np
 class SimpleFEMConfigGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("SimpleFEM 配置管理器")
-        self.root.geometry("1800x1000")
+
+        # 只在非全屏模式下设置窗口大小
+        if root.state() != 'zoomed':
+            self.root.title("SimpleFEM 配置管理器")
+            self.root.geometry("1800x1000")
 
         # 配置文件路径
         self.config_path = "simple_fem_config.json"
@@ -38,6 +41,32 @@ class SimpleFEMConfigGUI:
         # ROI1图片导航相关
         self.current_image_sequence = []  # 当前序列的图片列表
         self.current_image_index = -1     # 当前图片在序列中的索引
+
+        # 阈值提取测试相关
+        self.threshold_lower_var = tk.IntVar(value=140)
+        self.threshold_upper_var = tk.IntVar(value=255)
+        self.threshold_mask = None
+        self.largest_component_mask = None
+        self.overlay_enabled = tk.BooleanVar(value=True)
+        self.overlay_alpha = tk.DoubleVar(value=0.5)
+        self.current_overlay_image = None
+        self.current_overlay_photo = None
+        self.current_roi3_coords = None
+        self.current_mask_for_overlay = None
+
+        # 统计信息显示
+        self.total_pixels_var = tk.StringVar(value="0")
+        self.largest_component_pixels_var = tk.StringVar(value="0")
+        self.component_count_var = tk.StringVar(value="0")
+
+        # Continuous check functionality
+        self.continuous_check_enabled = tk.BooleanVar(value=False)
+
+        # 热力图相关状态变量
+        self.heat_map = None
+        self.heatmap_mode = False
+        self.heatmap_alpha_var = tk.DoubleVar(value=0.6)
+        self.continuous_heatmap_enabled = tk.BooleanVar(value=False)
 
         # 创建UI
         self.create_widgets()
@@ -187,26 +216,32 @@ class SimpleFEMConfigGUI:
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="ROI配置")
 
-        # 创建上下分栏布局：上方为配置区域，下方为可视化区域
-        config_frame = ttk.Frame(frame)
-        config_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(10, 5))
+        # 创建三栏布局：左侧-ROI预览，中部-配置，右侧-直方图
+        left_frame = ttk.Frame(frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 5), pady=10)
 
-        viz_frame = ttk.Frame(frame)
-        viz_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        middle_frame = ttk.Frame(frame)
+        middle_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 5), pady=10)
+
+        right_frame = ttk.Frame(frame)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 10), pady=10)
 
         self.roi_vars = {}
 
-        # ===== 上方：ROI参数配置 =====
+        # ===== 中部：ROI参数配置 =====
 
-        # 创建两列配置布局
-        left_config_frame = ttk.Frame(config_frame)
-        left_config_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 20))
+        # 创建中部配置区域
+        config_upper_frame = ttk.Frame(middle_frame)
+        config_upper_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        right_config_frame = ttk.Frame(config_frame)
-        right_config_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # ===== 右侧：直方图分析区域 =====
+        histogram_frame = ttk.Frame(right_frame)
+        histogram_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         # ROI1配置
-        ttk.Label(left_config_frame, text="ROI1 大区域配置", font=('Arial', 12, 'bold')).grid(row=0, column=0, columnspan=2, pady=(10, 5))
+        row = 0
+        ttk.Label(config_upper_frame, text="ROI1 大区域配置", font=('Arial', 12, 'bold')).grid(row=row, column=0, columnspan=2, pady=(10, 5))
+        row += 1
 
         roi1_configs = [
             ("roi_capture.default_config.x1", "X1坐标", "int"),
@@ -215,11 +250,10 @@ class SimpleFEMConfigGUI:
             ("roi_capture.default_config.y2", "Y2坐标", "int"),
         ]
 
-        row = 1
         for key, label, config_type in roi1_configs:
-            ttk.Label(left_config_frame, text=f"  {label}").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
+            ttk.Label(config_upper_frame, text=f"  {label}").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
             var = tk.StringVar()
-            entry = ttk.Entry(left_config_frame, textvariable=var, width=15)
+            entry = ttk.Entry(config_upper_frame, textvariable=var, width=15)
             entry.grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
             self.roi_vars[key] = var
             # 绑定值变化事件，实时更新可视化
@@ -227,7 +261,7 @@ class SimpleFEMConfigGUI:
             row += 1
 
         # ROI2配置
-        ttk.Label(left_config_frame, text="ROI2 小区域配置", font=('Arial', 12, 'bold')).grid(row=row, column=0, columnspan=2, pady=(10, 5))
+        ttk.Label(config_upper_frame, text="ROI2 小区域配置", font=('Arial', 12, 'bold')).grid(row=row, column=0, columnspan=2, pady=(10, 5))
         row += 1
 
         roi2_configs = [
@@ -238,9 +272,9 @@ class SimpleFEMConfigGUI:
         ]
 
         for key, label, config_type in roi2_configs:
-            ttk.Label(left_config_frame, text=f"  {label}").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
+            ttk.Label(config_upper_frame, text=f"  {label}").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
             var = tk.StringVar()
-            entry = ttk.Entry(left_config_frame, textvariable=var, width=15)
+            entry = ttk.Entry(config_upper_frame, textvariable=var, width=15)
             entry.grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
             self.roi_vars[key] = var
             # 绑定值变化事件，实时更新可视化
@@ -248,7 +282,8 @@ class SimpleFEMConfigGUI:
             row += 1
 
         # ROI3配置
-        ttk.Label(right_config_frame, text="ROI3 扩展区域配置", font=('Arial', 12, 'bold')).grid(row=0, column=0, columnspan=2, pady=(10, 5))
+        ttk.Label(config_upper_frame, text="ROI3 扩展区域配置", font=('Arial', 12, 'bold')).grid(row=row, column=0, columnspan=2, pady=(10, 5))
+        row += 1
 
         roi3_configs = [
             ("roi_capture.roi3_config.extension_params.left", "左边距", "int"),
@@ -257,19 +292,123 @@ class SimpleFEMConfigGUI:
             ("roi_capture.roi3_config.extension_params.bottom", "下边距", "int"),
         ]
 
-        row = 1
         for key, label, config_type in roi3_configs:
-            ttk.Label(right_config_frame, text=f"  {label}").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
+            ttk.Label(config_upper_frame, text=f"  {label}").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
             var = tk.StringVar()
-            entry = ttk.Entry(right_config_frame, textvariable=var, width=15)
+            entry = ttk.Entry(config_upper_frame, textvariable=var, width=15)
             entry.grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
             self.roi_vars[key] = var
             # 绑定值变化事件，实时更新可视化
             var.trace('w', lambda *args: self.update_roi_visualization())
             row += 1
 
-        # 其他ROI配置
-        ttk.Label(right_config_frame, text="其他配置", font=('Arial', 12, 'bold')).grid(row=row, column=0, columnspan=2, pady=(10, 5))
+        # ===== 阈值提取测试区域 =====
+        threshold_test_frame = ttk.LabelFrame(config_upper_frame, text="阈值提取测试区域", padding=10)
+        threshold_test_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W+tk.E, pady=(15, 5), padx=5)
+        row += 1
+
+        # 阈值控制区域
+        threshold_control_frame = ttk.Frame(threshold_test_frame)
+        threshold_control_frame.pack(fill=tk.X, pady=(0, 5))
+
+        ttk.Label(threshold_control_frame, text="阈值控制:", font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+
+        # Lower threshold
+        ttk.Label(threshold_control_frame, text="下限:").pack(side=tk.LEFT, padx=(0, 5))
+        lower_entry = ttk.Entry(threshold_control_frame, textvariable=self.threshold_lower_var, width=8)
+        lower_entry.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Upper threshold
+        ttk.Label(threshold_control_frame, text="上限:").pack(side=tk.LEFT, padx=(0, 5))
+        upper_entry = ttk.Entry(threshold_control_frame, textvariable=self.threshold_upper_var, width=8)
+        upper_entry.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Buttons
+        ttk.Button(threshold_control_frame, text="提取", command=self.on_threshold_submit).pack(side=tk.LEFT, padx=2)
+        ttk.Button(threshold_control_frame, text="清除", command=self.on_threshold_clear).pack(side=tk.LEFT, padx=2)
+
+        # Continuous check checkbox
+        continuous_check_frame = ttk.Frame(threshold_test_frame)
+        continuous_check_frame.pack(fill=tk.X, pady=(5, 5))
+
+        self.continuous_check_checkbox = ttk.Checkbutton(
+            continuous_check_frame,
+            text="连续检查 (加载图片时自动执行提取+最大连通域)",
+            variable=self.continuous_check_enabled
+        )
+        self.continuous_check_checkbox.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 连通域分析区域
+        component_frame = ttk.Frame(threshold_test_frame)
+        component_frame.pack(fill=tk.X, pady=(5, 5))
+
+        ttk.Label(component_frame, text="连通域分析:", font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(component_frame, text="最大连通域", command=self.on_max_component).pack(side=tk.LEFT, padx=2)
+        ttk.Button(component_frame, text="统计", command=self.on_statistics).pack(side=tk.LEFT, padx=2)
+
+        # 统计信息区域
+        stats_frame = ttk.Frame(threshold_test_frame)
+        stats_frame.pack(fill=tk.X, pady=(5, 5))
+
+        ttk.Label(stats_frame, text="统计信息:", font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(stats_frame, text="总像素:").pack(side=tk.LEFT, padx=(0, 5))
+        total_pixels_label = ttk.Label(stats_frame, textvariable=self.total_pixels_var, font=('Courier', 9), relief='sunken', padding=(3, 1))
+        total_pixels_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(stats_frame, text="最大连通域像素:").pack(side=tk.LEFT, padx=(0, 5))
+        largest_pixels_label = ttk.Label(stats_frame, textvariable=self.largest_component_pixels_var, font=('Courier', 9), relief='sunken', padding=(3, 1))
+        largest_pixels_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(stats_frame, text="连通域数量:").pack(side=tk.LEFT, padx=(0, 5))
+        component_count_label = ttk.Label(stats_frame, textvariable=self.component_count_var, font=('Courier', 9), relief='sunken', padding=(3, 1))
+        component_count_label.pack(side=tk.LEFT)
+
+        # 叠加控制区域
+        overlay_frame = ttk.Frame(threshold_test_frame)
+        overlay_frame.pack(fill=tk.X, pady=(5, 0))
+
+        ttk.Label(overlay_frame, text="叠加控制:", font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+
+        self.overlay_checkbox = ttk.Checkbutton(overlay_frame, text="显示叠加", variable=self.overlay_enabled,
+                                                command=self.on_overlay_toggle)
+        self.overlay_checkbox.pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(overlay_frame, text="透明度:").pack(side=tk.LEFT, padx=(0, 5))
+        self.alpha_scale = ttk.Scale(overlay_frame, from_=0.0, to=1.0, variable=self.overlay_alpha,
+                                   orient=tk.HORIZONTAL, length=100, command=self.on_alpha_change)
+        self.alpha_scale.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.alpha_value_label = ttk.Label(overlay_frame, text="0.5", font=('Courier', 9))
+        self.alpha_value_label.pack(side=tk.LEFT)
+
+        # 热力图控制区域 (在叠加控制区域下方)
+        heatmap_frame = ttk.Frame(threshold_test_frame)
+        heatmap_frame.pack(fill=tk.X, pady=(5, 0))
+
+        ttk.Label(heatmap_frame, text="热力图控制:", font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+        self.heatmap_button = ttk.Button(heatmap_frame, text="热力图显示", command=self.on_heatmap_submit)
+        self.heatmap_button.pack(side=tk.LEFT, padx=2)
+        self.heatmap_clear_button = ttk.Button(heatmap_frame, text="清除热力图", command=self.on_heatmap_clear)
+        self.heatmap_clear_button.pack(side=tk.LEFT, padx=2)
+
+        self.continuous_heatmap_checkbox = ttk.Checkbutton(
+            heatmap_frame,
+            text="连续热力图 (加载图片时自动执行)",
+            variable=self.continuous_heatmap_enabled
+        )
+        self.continuous_heatmap_checkbox.pack(side=tk.LEFT, padx=(10, 5))
+
+        ttk.Label(heatmap_frame, text="热力图透明度:").pack(side=tk.LEFT, padx=(10, 5))
+        self.heatmap_alpha_scale = ttk.Scale(heatmap_frame, from_=0.0, to=1.0, variable=self.heatmap_alpha_var,
+                                            orient=tk.HORIZONTAL, length=100, command=self.on_heatmap_alpha_change)
+        self.heatmap_alpha_scale.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.heatmap_alpha_value_label = ttk.Label(heatmap_frame, text="0.6", font=('Courier', 9))
+        self.heatmap_alpha_value_label.pack(side=tk.LEFT)
+
+        # 其他配置
+        ttk.Label(config_upper_frame, text="其他配置", font=('Arial', 12, 'bold')).grid(row=row, column=0, columnspan=2, pady=(10, 5))
         row += 1
 
         other_configs = [
@@ -278,49 +417,82 @@ class SimpleFEMConfigGUI:
         ]
 
         for key, label, config_type in other_configs:
-            ttk.Label(right_config_frame, text=f"  {label}").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
+            ttk.Label(config_upper_frame, text=f"  {label}").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
 
             if config_type == "bool":
                 var = tk.BooleanVar()
-                ttk.Checkbutton(right_config_frame, variable=var).grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
+                ttk.Checkbutton(config_upper_frame, variable=var).grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
             else:
                 var = tk.StringVar()
-                ttk.Entry(right_config_frame, textvariable=var, width=15).grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
+                ttk.Entry(config_upper_frame, textvariable=var, width=15).grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
 
             self.roi_vars[key] = var
             row += 1
 
-        # ===== 下方：ROI可视化区域 =====
+        # ===== 直方图分析区域（独立于配置序列）=====
 
-        # 可视化控制面板
-        control_panel = ttk.Frame(viz_frame)
-        control_panel.pack(side=tk.TOP, fill=tk.X, pady=(10, 5))
+        # 直方图标题
+        histogram_title_frame = ttk.Frame(histogram_frame)
+        histogram_title_frame.pack(side=tk.TOP, fill=tk.X, pady=(10, 5))
 
-        viz_title = ttk.Label(control_panel, text="ROI区域可视化与灰度分析", font=('Arial', 14, 'bold'))
-        viz_title.pack(side=tk.LEFT, padx=10)
+        histogram_title = ttk.Label(histogram_title_frame, text="ROI灰度直方图分析", font=('Arial', 14, 'bold'))
+        histogram_title.pack(side=tk.LEFT, padx=10)
 
-        # 图片导入按钮放在右侧
-        button_frame = ttk.Frame(control_panel)
+        # 直方图画布框架
+        curve_frame = ttk.LabelFrame(histogram_frame, text="直方图分析区域", padding=10)
+        curve_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 0))
+
+        self.curve_canvas = tk.Canvas(curve_frame, bg='white', width=600, height=900,
+                                     highlightthickness=1, highlightbackground='gray')
+        self.curve_canvas.pack(fill=tk.BOTH, expand=True)
+
+        # 绑定鼠标滚轮事件用于Y轴缩放
+        self.curve_canvas.bind("<MouseWheel>", self.on_curve_canvas_mousewheel)
+        self.curve_canvas.bind("<Control-MouseWheel>", self.on_curve_canvas_mousewheel_reset)  # Ctrl+滚轮重置
+        self.curve_canvas.bind("<Button-4>", self.on_curve_canvas_mousewheel)  # Linux
+        self.curve_canvas.bind("<Button-5>", self.on_curve_canvas_mousewheel)  # Linux
+        self.curve_canvas.bind("<Control-Button-4>", self.on_curve_canvas_mousewheel_reset)  # Linux Ctrl+滚轮重置
+        self.curve_canvas.bind("<Control-Button-5>", self.on_curve_canvas_mousewheel_reset)  # Linux Ctrl+滚轮重置
+
+        # 为曲线画布添加焦点和键盘事件
+        self.curve_canvas.bind('<Button-1>', lambda e: self.curve_canvas.focus_set())  # 点击画布时获取焦点
+        self.curve_canvas.bind('<Key>', self.on_key_press)  # 在画布上监听键盘事件
+        self.curve_canvas.bind('<d>', lambda e: self.on_key_press(e))
+        self.curve_canvas.bind('<a>', lambda e: self.on_key_press(e))
+
+        # ===== 左侧：ROI1预览区域 =====
+
+        # ROI1预览标题和控制
+        left_title_frame = ttk.Frame(left_frame)
+        left_title_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 5))
+
+        left_title = ttk.Label(left_title_frame, text="ROI1 区域叠加预览", font=('Arial', 14, 'bold'))
+        left_title.pack(side=tk.LEFT, padx=10)
+
+        # 图片导入按钮放在标题右侧
+        button_frame = ttk.Frame(left_title_frame)
         button_frame.pack(side=tk.RIGHT, padx=10)
 
-        ttk.Button(button_frame, text="导入ROI1图片",
+        ttk.Button(button_frame, text="导入图片",
                   command=self.import_roi1_image).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="清除图片",
                   command=self.clear_roi1_image).pack(side=tk.LEFT, padx=5)
 
         # 当前图片路径显示
         self.image_path_var = tk.StringVar(value="未选择图片")
-        path_label = ttk.Label(button_frame, textvariable=self.image_path_var,
-                               foreground='gray', font=('Arial', 9))
-        path_label.pack(side=tk.LEFT, padx=(20, 0))
+        path_frame = ttk.Frame(left_frame)
+        path_frame.pack(side=tk.TOP, fill=tk.X, pady=(5, 10))
 
-        # 主要可视化区域：左右分栏 - ROI叠加图片和灰度曲线
-        main_viz_frame = ttk.Frame(viz_frame)
-        main_viz_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 5))
+        path_label = ttk.Label(path_frame, text="当前图片:", font=('Arial', 10))
+        path_label.pack(side=tk.LEFT, padx=(10, 5))
 
-        # 左侧：ROI叠加图片 (640x900)
-        roi_frame = ttk.LabelFrame(main_viz_frame, text="ROI区域叠加预览 (640x900)", padding=10)
-        roi_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        path_value = ttk.Label(path_frame, textvariable=self.image_path_var,
+                              foreground='gray', font=('Arial', 9))
+        path_value.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # ROI1预览画布框架
+        roi_frame = ttk.LabelFrame(left_frame, text="ROI1预览区域", padding=10)
+        roi_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self.roi_canvas = tk.Canvas(roi_frame, bg='white', width=640, height=900,
                                    highlightthickness=1, highlightbackground='gray')
@@ -345,34 +517,8 @@ class SimpleFEMConfigGUI:
                                          padding=(5, 2))
         self.pixel_info_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # 右侧：灰度曲线坐标系 (600x900)
-        curve_frame = ttk.LabelFrame(main_viz_frame, text="ROI灰度直方图分析 (600x900)", padding=10)
-        curve_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
-
-        self.curve_canvas = tk.Canvas(curve_frame, bg='white', width=600, height=900,
-                                     highlightthickness=1, highlightbackground='gray')
-        self.curve_canvas.pack(fill=tk.BOTH, expand=True)
-
-        # 绑定鼠标滚轮事件用于Y轴缩放
-        self.curve_canvas.bind("<MouseWheel>", self.on_curve_canvas_mousewheel)
-        self.curve_canvas.bind("<Control-MouseWheel>", self.on_curve_canvas_mousewheel_reset)  # Ctrl+滚轮重置
-        self.curve_canvas.bind("<Button-4>", self.on_curve_canvas_mousewheel)  # Linux
-        self.curve_canvas.bind("<Button-5>", self.on_curve_canvas_mousewheel)  # Linux
-        self.curve_canvas.bind("<Control-Button-4>", self.on_curve_canvas_mousewheel_reset)  # Linux Ctrl+滚轮重置
-        self.curve_canvas.bind("<Control-Button-5>", self.on_curve_canvas_mousewheel_reset)  # Linux Ctrl+滚轮重置
-
-        # 为曲线画布添加焦点和键盘事件
-        self.curve_canvas.bind('<Button-1>', lambda e: self.curve_canvas.focus_set())  # 点击画布时获取焦点
-        self.curve_canvas.bind('<Key>', self.on_key_press)  # 在画布上监听键盘事件
-        self.curve_canvas.bind('<d>', lambda e: self.on_key_press(e))
-        self.curve_canvas.bind('<a>', lambda e: self.on_key_press(e))
-        self.curve_canvas.bind('<Left>', lambda e: self.on_key_press(e))
-        self.curve_canvas.bind('<Right>', lambda e: self.on_key_press(e))
-
-        print("[DEBUG] 鼠标滚轮和键盘事件已绑定到曲线画布")
-
-        # 底部：图例说明
-        legend_container = ttk.Frame(viz_frame)
+        # 底部：图例说明 (放在直方图区域下方)
+        legend_container = ttk.Frame(histogram_frame)
         legend_container.pack(fill=tk.X, pady=(5, 0))
 
         # ROI图例
@@ -439,6 +585,7 @@ class SimpleFEMConfigGUI:
         axis_label = ttk.Label(curve_legend_content, text="X:灰度值(0-255) | Y:像素数", font=('Arial', 8), foreground='gray')
         axis_label.pack(side=tk.LEFT, padx=(15, 0))
 
+  
     def create_peak_detection_tab(self):
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="峰值检测")
@@ -691,6 +838,18 @@ class SimpleFEMConfigGUI:
             else:
                 var.set(str(value) if value is not None else "")
 
+        # 确保ROI3扩展参数有默认值
+        roi3_defaults = {
+            "roi_capture.roi3_config.extension_params.left": "30",
+            "roi_capture.roi3_config.extension_params.right": "40",
+            "roi_capture.roi3_config.extension_params.top": "70",
+            "roi_capture.roi3_config.extension_params.bottom": "30"
+        }
+
+        for key, default_value in roi3_defaults.items():
+            if key in self.roi_vars and (not self.roi_vars[key].get() or self.roi_vars[key].get().strip() == ""):
+                self.roi_vars[key].set(default_value)
+
     def get_nested_value(self, key_path: str, data: dict):
         """获取嵌套字典中的值"""
         keys = key_path.split('.')
@@ -837,6 +996,14 @@ class SimpleFEMConfigGUI:
 
                 # 更新可视化
                 self.update_roi_visualization()
+
+                # 连续检查：自动执行阈值处理
+                if self.continuous_check_enabled.get():
+                    self.root.after(200, self.auto_execute_threshold_processing)
+
+                # 连续热力图：自动执行热力图处理（独立于连续检查）
+                if self.continuous_heatmap_enabled.get():
+                    self.root.after(300, self.auto_execute_heatmap_processing)
 
                 # 显示序列信息
                 if len(self.current_image_sequence) > 1:
@@ -1573,7 +1740,392 @@ class SimpleFEMConfigGUI:
         except Exception as e:
             print(f"[ERROR] 鼠标离开事件处理失败: {e}")
 
-    
+    def on_threshold_submit(self):
+        """处理阈值提取提交"""
+        try:
+            if not self.roi1_image:
+                self.status_var.set("请先导入ROI1图片")
+                return
+
+            # 验证阈值输入
+            lower = self.threshold_lower_var.get()
+            upper = self.threshold_upper_var.get()
+
+            if lower < 0 or upper > 255 or lower > upper:
+                self.status_var.set("阈值范围无效 (0-255, 且下限≤上限)")
+                return
+
+            # 如果当前处于热力图模式，清除热力图（互斥显示）
+            if hasattr(self, 'heatmap_mode') and self.heatmap_mode:
+                self.heat_map = None
+                self.heatmap_mode = False
+
+            # 提取ROI3
+            roi_config = self.get_roi_config_values()
+            roi3_image, roi3_coords = self.extract_roi3_from_roi1(self.roi1_image, roi_config)
+
+            if roi3_image is None:
+                self.status_var.set("ROI3提取失败")
+                return
+
+            # 应用阈值
+            self.threshold_mask = self.apply_threshold_extraction(roi3_image, lower, upper)
+
+            if self.threshold_mask is None:
+                self.status_var.set("阈值处理失败")
+                return
+
+            # 创建叠加
+            self.current_roi3_coords = roi3_coords
+            self.current_mask_for_overlay = self.threshold_mask
+            self.update_overlay()
+
+            # 计算并显示统计信息
+            self.calculate_mask_statistics()
+
+            self.status_var.set(f"阈值提取完成: {lower}-{upper}")
+
+        except Exception as e:
+            self.status_var.set(f"阈值提取失败: {str(e)}")
+
+    def on_threshold_clear(self):
+        """处理阈值清除"""
+        self.threshold_mask = None
+        self.largest_component_mask = None
+        self.current_overlay_image = None
+        self.current_overlay_photo = None
+        self.current_roi3_coords = None
+        self.current_mask_for_overlay = None
+
+        # 重置统计信息
+        self.total_pixels_var.set("0")
+        self.largest_component_pixels_var.set("0")
+        self.component_count_var.set("0")
+
+        # 更新画布（不显示叠加）
+        self.update_roi_visualization()
+
+        self.status_var.set("阈值已清除")
+
+    def on_max_component(self):
+        """处理最大连通域提取"""
+        try:
+            if self.threshold_mask is None:
+                self.status_var.set("请先进行阈值提取")
+                return
+
+            # 如果当前处于热力图模式，清除热力图（互斥显示）
+            if hasattr(self, 'heatmap_mode') and self.heatmap_mode:
+                self.heat_map = None
+                self.heatmap_mode = False
+
+            # 执行连通域分析
+            largest_mask, largest_area, component_count = self.analyze_connected_components(self.threshold_mask)
+
+            if largest_mask is None:
+                self.status_var.set("未找到连通域")
+                return
+
+            self.largest_component_mask = largest_mask
+
+            # 使用最大连通域作为当前mask
+            self.current_mask_for_overlay = largest_mask
+
+            # 更新叠加
+            self.update_overlay()
+
+            # 更新统计信息
+            self.largest_component_pixels_var.set(str(largest_area))
+            self.component_count_var.set(str(component_count))
+
+            self.status_var.set(f"最大连通域提取完成: {largest_area}像素")
+
+        except Exception as e:
+            self.status_var.set(f"连通域分析失败: {str(e)}")
+
+    def auto_execute_threshold_processing(self):
+        """自动执行阈值提取和最大连通域处理"""
+        try:
+            if not self.continuous_check_enabled.get():
+                return False
+
+            if not self.roi1_image:
+                return False
+
+            print("[INFO] 连续检查模式：自动执行阈值提取...")
+
+            # 执行阈值提取
+            self.on_threshold_submit()
+
+            # 延迟执行最大连通域分析
+            self.root.after(100, self._auto_execute_max_component)
+
+            # 延迟执行热力图显示（如果启用连续热力图）
+            if self.continuous_heatmap_enabled.get():
+                self.root.after(200, self._auto_execute_heat_map)
+
+            return True
+
+        except Exception as e:
+            print(f"[ERROR] 连续检查执行失败: {e}")
+            self.status_var.set(f"连续检查失败: {str(e)}")
+            return False
+
+    def auto_execute_heatmap_processing(self):
+        """自动执行热力图处理"""
+        try:
+            if not self.continuous_heatmap_enabled.get():
+                return False
+
+            if not self.roi1_image:
+                return False
+
+            print("[INFO] 连续热力图模式：自动执行热力图显示...")
+
+            # 延迟执行热力图显示
+            self.root.after(100, self._auto_execute_heat_map)
+
+            return True
+
+        except Exception as e:
+            print(f"[ERROR] 连续热力图执行失败: {e}")
+            self.status_var.set(f"连续热力图失败: {str(e)}")
+            return False
+
+    def _auto_execute_max_component(self):
+        """延迟执行最大连通域分析"""
+        try:
+            if self.threshold_mask is not None:
+                print("[INFO] 连续检查模式：自动执行最大连通域分析...")
+                self.on_max_component()
+                self.status_var.set("连续检查：自动完成提取+最大连通域分析")
+
+        except Exception as e:
+            print(f"[ERROR] 连续检查-最大连通域执行失败: {e}")
+
+    def _auto_execute_heat_map(self):
+        """延迟执行热力图显示"""
+        try:
+            # 检查是否需要执行热力图显示
+            should_execute = False
+            status_message = ""
+
+            if self.continuous_check_enabled.get() and self.roi1_image:
+                # 连续检查模式下的热力图执行
+                should_execute = True
+                status_message = "连续检查：自动完成提取+最大连通域+热力图显示"
+                print("[INFO] 连续检查模式：自动执行热力图显示...")
+            elif self.continuous_heatmap_enabled.get() and self.roi1_image:
+                # 独立的连续热力图模式
+                should_execute = True
+                status_message = "连续热力图：自动完成热力图显示"
+                print("[INFO] 连续热力图模式：自动执行热力图显示...")
+
+            if should_execute:
+                self.on_heatmap_submit()
+                self.status_var.set(status_message)
+
+        except Exception as e:
+            print(f"[ERROR] 热力图执行失败: {e}")
+
+    def on_statistics(self):
+        """处理统计计算"""
+        self.calculate_mask_statistics()
+
+    def on_overlay_toggle(self):
+        """处理叠加显示切换"""
+        self.update_roi_canvas_with_overlay()
+
+    def on_alpha_change(self, value):
+        """处理透明度变化"""
+        try:
+            alpha = float(value)
+            self.alpha_value_label.config(text=f"{alpha:.2f}")
+            self.update_overlay()
+        except:
+            pass
+
+    def on_heatmap_submit(self):
+        """处理热力图显示按钮点击"""
+        try:
+            if not self.roi1_image:
+                messagebox.showwarning("警告", "请先导入ROI1图像")
+                return
+
+            self.status_var.set("正在生成热力图...")
+            self.root.update()
+
+            # 获取ROI配置
+            roi_config = self.get_roi_config_values()
+            if not roi_config.get('roi3'):
+                messagebox.showwarning("警告", "请先配置ROI3扩展参数")
+                return
+
+            # 提取ROI3图像
+            roi3_image, roi3_coords = self.extract_roi3_from_roi1(self.roi1_image, roi_config)
+            if roi3_image is None:
+                messagebox.showerror("错误", "ROI3提取失败")
+                return
+
+            # 生成热力图
+            print("[DEBUG] 开始生成热力图...")
+            self.heat_map = self.apply_heat_map_extraction(roi3_image)
+            if self.heat_map is None:
+                print("[ERROR] 热力图生成失败")
+                messagebox.showerror("错误", "热力图生成失败")
+                return
+
+            print(f"[DEBUG] 热力图生成成功: {self.heat_map.shape}")
+
+            # 设置热力图模式
+            self.heatmap_mode = True
+
+            # 保存ROI3坐标（用于叠加）
+            self.current_roi3_coords = roi3_coords
+            print(f"[DEBUG] ROI3坐标已保存: {roi3_coords}")
+
+            # 禁用阈值叠加（互斥显示）
+            self.overlay_enabled.set(False)
+
+            # 更新热力图显示
+            print("[DEBUG] 开始更新热力图叠加...")
+            self.update_heat_map_overlay()
+            print("[DEBUG] 热力图叠加更新完成")
+
+            # 更新统计信息
+            self.calculate_heat_map_statistics()
+
+            self.status_var.set("热力图显示完成")
+
+        except Exception as e:
+            messagebox.showerror("错误", f"热力图处理失败: {e}")
+
+    def on_heatmap_clear(self):
+        """处理清除热力图按钮点击"""
+        try:
+            # 清除热力图数据
+            self.heat_map = None
+            self.heatmap_mode = False
+
+            # 更新画布显示
+            self.update_roi_visualization()
+
+            # 清除统计信息
+            self.total_pixels_var.set("0")
+            self.largest_pixels_var.set("0")
+            self.component_count_var.set("0")
+
+            self.status_var.set("热力图已清除")
+
+        except Exception as e:
+            print(f"[ERROR] 清除热力图失败: {e}")
+
+    def on_heatmap_alpha_change(self, value):
+        """处理热力图透明度变化"""
+        try:
+            alpha = float(value)
+            self.heatmap_alpha_value_label.config(text=f"{alpha:.2f}")
+            if self.heatmap_mode and self.heat_map is not None:
+                self.update_heat_map_overlay()
+        except:
+            pass
+
+    def calculate_heat_map_statistics(self):
+        """计算热力图统计信息"""
+        try:
+            if self.heat_map is not None:
+                import numpy as np
+                # 统计非零像素（实际上所有像素都有颜色）
+                total_pixels = self.heat_map.shape[0] * self.heat_map.shape[1]
+                self.total_pixels_var.set(str(total_pixels))
+
+                # 对于热力图，最大连通域就是整个热力图区域
+                # 使用getattr避免属性不存在的错误
+                if hasattr(self, 'largest_pixels_var'):
+                    self.largest_pixels_var.set(str(total_pixels))
+                if hasattr(self, 'component_count_var'):
+                    self.component_count_var.set("1")
+            else:
+                self.total_pixels_var.set("0")
+                if hasattr(self, 'largest_pixels_var'):
+                    self.largest_pixels_var.set("0")
+                if hasattr(self, 'component_count_var'):
+                    self.component_count_var.set("0")
+
+        except Exception as e:
+            print(f"[ERROR] 热力图统计计算失败: {e}")
+
+    def calculate_mask_statistics(self):
+        """计算mask统计信息"""
+        try:
+            if hasattr(self, 'current_mask_for_overlay') and self.current_mask_for_overlay is not None:
+                import numpy as np
+                mask = self.current_mask_for_overlay
+                total_pixels = np.sum(mask > 0)
+                self.total_pixels_var.set(str(total_pixels))
+            elif self.threshold_mask is not None:
+                import numpy as np
+                total_pixels = np.sum(self.threshold_mask > 0)
+                self.total_pixels_var.set(str(total_pixels))
+            else:
+                self.total_pixels_var.set("0")
+
+        except Exception as e:
+            print(f"[ERROR] 统计计算失败: {e}")
+
+    def update_overlay(self):
+        """更新叠加图像"""
+        try:
+            if not hasattr(self, 'current_roi3_coords') or self.current_roi3_coords is None:
+                return
+
+            # 确定使用哪个mask
+            if hasattr(self, 'current_mask_for_overlay') and self.current_mask_for_overlay is not None:
+                mask = self.current_mask_for_overlay
+            elif self.threshold_mask is not None:
+                mask = self.threshold_mask
+            else:
+                return
+
+            # 创建叠加
+            overlay = self.create_overlay_image(
+                self.roi1_image,
+                mask,
+                self.current_roi3_coords,
+                self.overlay_alpha.get()
+            )
+
+            if overlay is not None:
+                self.current_overlay_image = overlay
+                self.update_roi_canvas_with_overlay()
+
+        except Exception as e:
+            print(f"[ERROR] 叠加更新失败: {e}")
+
+    def update_heat_map_overlay(self):
+        """更新热力图叠加图像"""
+        try:
+            if not hasattr(self, 'current_roi3_coords') or self.current_roi3_coords is None:
+                return
+
+            if self.heat_map is None:
+                return
+
+            # 创建热力图叠加
+            overlay = self.create_heat_map_overlay_image(
+                self.roi1_image,
+                self.heat_map,
+                self.current_roi3_coords,
+                self.heatmap_alpha_var.get()
+            )
+
+            if overlay is not None:
+                self.current_overlay_image = overlay
+                self.update_roi_canvas_with_overlay()
+
+        except Exception as e:
+            print(f"[ERROR] 热力图叠加更新失败: {e}")
+
     def get_y_zoom_info(self):
         """获取当前Y轴缩放信息"""
         return {
@@ -1583,6 +2135,299 @@ class SimpleFEMConfigGUI:
             'can_zoom_in': self.y_zoom_factor < self.y_max_zoom,
             'can_zoom_out': self.y_zoom_factor > self.y_min_zoom
         }
+
+    def extract_roi3_from_roi1(self, roi1_image, roi_config):
+        """从ROI1图像中提取ROI3区域"""
+        try:
+            if roi1_image is None:
+                return None, None
+
+            # 获取ROI1尺寸
+            roi1_width, roi1_height = roi1_image.size
+
+            # 计算ROI3区域中心（使用图像中心作为交点）
+            center_x = roi1_width // 2
+            center_y = roi1_height // 2
+
+            # 从配置中获取ROI3扩展参数
+            roi3_params = roi_config['roi3']
+            left = roi3_params[0]   # 左扩展
+            right = roi3_params[1]  # 右扩展
+            top = roi3_params[2]    # 上扩展
+            bottom = roi3_params[3]  # 下扩展
+
+            # 计算ROI3区域坐标
+            roi3_left = center_x - left
+            roi3_top = center_y - top
+            roi3_right = center_x + right
+            roi3_bottom = center_y + bottom
+
+            # 确保坐标在图像边界内
+            roi3_left = max(0, roi3_left)
+            roi3_top = max(0, roi3_top)
+            roi3_right = min(roi1_width, roi3_right)
+            roi3_bottom = min(roi1_height, roi3_bottom)
+
+            # 提取ROI3区域
+            roi3_region = roi1_image.crop((roi3_left, roi3_top, roi3_right, roi3_bottom))
+
+            return roi3_region, (roi3_left, roi3_top, roi3_right, roi3_bottom)
+
+        except Exception as e:
+            print(f"[ERROR] ROI3提取失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+
+    def apply_threshold_extraction(self, roi3_image, lower_thresh, upper_thresh):
+        """对ROI3图像应用阈值范围提取，生成二进制mask"""
+        try:
+            import cv2
+            import numpy as np
+
+            if roi3_image is None:
+                return None
+
+            # 转换为灰度图（如果还不是）
+            if roi3_image.mode != 'L':
+                roi3_gray = roi3_image.convert('L')
+            else:
+                roi3_gray = roi3_image
+
+            # 转换为numpy数组
+            roi3_array = np.array(roi3_gray)
+
+            # 应用阈值范围
+            mask = cv2.inRange(roi3_array, lower_thresh, upper_thresh)
+
+            return mask
+
+        except Exception as e:
+            print(f"[ERROR] 阈值提取失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def apply_heat_map_extraction(self, roi3_image):
+        """对ROI3图像应用热力图提取，生成彩色热力图"""
+        try:
+            import numpy as np
+
+            if roi3_image is None:
+                return None
+
+            # 转换为灰度图（如果还不是）
+            if roi3_image.mode != 'L':
+                roi3_gray = roi3_image.convert('L')
+            else:
+                roi3_gray = roi3_image
+
+            # 转换为numpy数组
+            roi3_array = np.array(roi3_gray)
+
+            # 创建RGB彩色热力图
+            heat_map = np.zeros((roi3_array.shape[0], roi3_array.shape[1], 3), dtype=np.uint8)
+
+            # 定义颜色映射分段点：蓝(0-63)→黄(64-127)→橙(128-191)→红(192-255)
+            blue_mask = roi3_array <= 63
+            yellow_mask = (roi3_array >= 64) & (roi3_array <= 127)
+            orange_mask = (roi3_array >= 128) & (roi3_array <= 191)
+            red_mask = roi3_array >= 192
+
+            # 应用颜色映射
+            heat_map[blue_mask] = [0, 0, 255]      # 蓝色
+            heat_map[yellow_mask] = [255, 255, 0]  # 黄色
+            heat_map[orange_mask] = [255, 165, 0]  # 橙色
+            heat_map[red_mask] = [255, 0, 0]      # 红色
+
+            return heat_map
+
+        except Exception as e:
+            print(f"[ERROR] 热力图生成失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def analyze_connected_components(self, threshold_mask):
+        """对阈值mask进行连通域分析，返回最大连通域mask和统计信息"""
+        try:
+            import cv2
+            import numpy as np
+
+            if threshold_mask is None:
+                return None, 0, 0
+
+            # 执行连通域分析
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+                threshold_mask, connectivity=8, ltype=cv2.CV_32S
+            )
+
+            # 查找最大连通域（排除背景标签0）
+            if num_labels > 1:
+                largest_area = 0
+                largest_label = 1
+
+                for i in range(1, num_labels):
+                    area = stats[i, cv2.CC_STAT_AREA]
+                    if area > largest_area:
+                        largest_area = area
+                        largest_label = i
+
+                # 创建仅包含最大连通域的mask
+                largest_component_mask = np.zeros_like(threshold_mask)
+                largest_component_mask[labels == largest_label] = 255
+
+                total_pixels = np.sum(threshold_mask > 0)
+                component_count = num_labels - 1
+
+                return largest_component_mask, largest_area, component_count
+            else:
+                return None, 0, 0
+
+        except Exception as e:
+            print(f"[ERROR] 连通域分析失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, 0, 0
+
+    def create_overlay_image(self, base_image, mask, roi3_coords, alpha=0.5):
+        """创建半透明叠加图像用于画布显示"""
+        try:
+            import numpy as np
+            from PIL import ImageDraw
+
+            if mask is None or roi3_coords is None:
+                return None
+
+            # 创建与基础图像相同大小的叠加图像
+            overlay = Image.new('RGBA', base_image.size, (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+
+            roi3_left, roi3_top, roi3_right, roi3_bottom = roi3_coords
+            roi3_width = roi3_right - roi3_left
+            roi3_height = roi3_bottom - roi3_top
+
+            # 将mask调整为ROI3尺寸
+            mask_pil = Image.fromarray(mask)
+            mask_resized = mask_pil.resize((roi3_width, roi3_height), Image.Resampling.NEAREST)
+
+            # 创建带透明度的彩色叠加
+            overlay_color = (255, 255, 0, int(255 * alpha))  # 黄色带alpha
+
+            # 在mask激活区域应用叠加
+            mask_array = np.array(mask_resized)
+            for y in range(roi3_height):
+                for x in range(roi3_width):
+                    if mask_array[y, x] > 0:
+                        overlay_draw.point((roi3_left + x, roi3_top + y), fill=overlay_color)
+
+            return overlay
+
+        except Exception as e:
+            print(f"[ERROR] 叠加图像创建失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def create_heat_map_overlay_image(self, base_image, heat_map, roi3_coords, alpha=0.6):
+        """创建热力图叠加图像用于画布显示"""
+        try:
+            import numpy as np
+            from PIL import ImageDraw
+
+            if heat_map is None or roi3_coords is None:
+                return None
+
+            # 创建与基础图像相同大小的叠加图像
+            overlay = Image.new('RGBA', base_image.size, (0, 0, 0, 0))
+
+            roi3_left, roi3_top, roi3_right, roi3_bottom = roi3_coords
+            roi3_width = roi3_right - roi3_left
+            roi3_height = roi3_bottom - roi3_top
+
+            # 将热力图调整为ROI3尺寸
+            heat_map_pil = Image.fromarray(heat_map)
+            heat_map_resized = heat_map_pil.resize((roi3_width, roi3_height), Image.Resampling.NEAREST)
+
+            # 转换为RGBA并添加透明度
+            heat_map_rgba = heat_map_resized.convert('RGBA')
+
+            # 创建透明度蒙版
+            alpha_array = np.full((roi3_height, roi3_width), int(255 * alpha), dtype=np.uint8)
+            alpha_pil = Image.fromarray(alpha_array)
+
+            # 将alpha通道应用到热力图
+            r, g, b, a = heat_map_rgba.split()
+            heat_map_with_alpha = Image.merge('RGBA', (r, g, b, alpha_pil))
+
+            # 将热力图叠加到基础图像上
+            overlay.paste(heat_map_with_alpha, (roi3_left, roi3_top), heat_map_with_alpha)
+
+            return overlay
+
+        except Exception as e:
+            print(f"[ERROR] 热力图叠加图像创建失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def update_roi_canvas_with_overlay(self):
+        """更新ROI1画布叠加显示（支持热力图和阈值mask的互斥显示）"""
+        try:
+            # 首先调用现有的可视化
+            self.update_roi_visualization()
+
+            # 检查是否显示叠加（热力图模式或阈值mask模式）
+            show_overlay = False
+
+            # 热力图模式：优先检查是否在热力图模式
+            if hasattr(self, 'heatmap_mode') and self.heatmap_mode and self.heat_map is not None:
+                show_overlay = True
+            # 阈值mask模式：检查是否启用阈值叠加
+            elif self.overlay_enabled.get() and hasattr(self, 'current_overlay_image') and self.current_overlay_image:
+                show_overlay = True
+
+            # 如果显示叠加且有叠加图像，则添加到画布
+            if show_overlay:
+                # 获取画布尺寸
+                canvas_width = self.roi_canvas.winfo_width()
+                canvas_height = self.roi_canvas.winfo_height()
+
+                if canvas_width <= 1 or canvas_height <= 1:
+                    canvas_width = 640
+                    canvas_height = 900
+
+                # 计算缩放因子（重用现有逻辑）
+                roi_config = self.get_roi_config_values()
+                roi1_x1, roi1_y1, roi1_x2, roi1_y2 = roi_config['roi1']
+                roi1_width = roi1_x2 - roi1_x1
+                roi1_height = roi1_y2 - roi1_y1
+
+                scale_x = (canvas_width - 20) / roi1_width
+                scale_y = (canvas_height - 20) / roi1_height
+                scale = min(scale_x, scale_y, 1.0)
+
+                x_offset = (canvas_width - roi1_width * scale) // 2
+                y_offset = (canvas_height - roi1_height * scale) // 2
+
+                # 转换叠加图像为PhotoImage
+                overlay_photo = ImageTk.PhotoImage(self.current_overlay_image)
+
+                # 在画布上绘制叠加
+                self.roi_canvas.create_image(
+                    canvas_width // 2, canvas_height // 2,
+                    image=overlay_photo,
+                    anchor=tk.CENTER,
+                    tags="overlay"
+                )
+
+                # 存储引用以防止垃圾回收
+                self.current_overlay_photo = overlay_photo
+
+        except Exception as e:
+            print(f"[ERROR] 画布叠加更新失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     def detect_image_sequence(self, current_file):
         """检测当前图片所在的序列 - 改进的数字索引版本"""
@@ -1696,6 +2541,14 @@ class SimpleFEMConfigGUI:
             self.image_path_var.set(f"已加载: {os.path.basename(new_file)}")
             self.update_roi_visualization()
 
+            # 连续检查：自动执行阈值处理
+            if self.continuous_check_enabled.get():
+                self.root.after(200, self.auto_execute_threshold_processing)
+
+            # 连续热力图：自动执行热力图处理（独立于连续检查）
+            if self.continuous_heatmap_enabled.get():
+                self.root.after(300, self.auto_execute_heatmap_processing)
+
             # 更新状态栏
             sequence_info = f" | 序列: {index+1}/{len(self.current_image_sequence)}"
             self.status_var.set(f"ROI1图片已加载: {os.path.basename(new_file)}{sequence_info} (按D/A或→/←切换)")
@@ -1752,10 +2605,43 @@ class SimpleFEMConfigGUI:
 def main():
     """主函数"""
     root = tk.Tk()
+
+    # 设置窗口标题
+    root.title("SimpleFEM 配置管理器")
+
+    # 自动全屏
+    root.state('zoomed')  # Windows全屏
+    # 如果在其他平台上，可以使用以下方式：
+    # root.attributes('-zoomed', True)  # 跨平台全屏
+
+    print("[INFO] 程序已启动并自动全屏")
+    print("[INFO] 按 F11 键可以切换全屏模式")
+
     app = SimpleFEMConfigGUI(root)
 
     # 设置窗口图标（如果有的话）
     # root.iconbitmap('icon.ico')
+
+    # 添加F11键切换全屏功能
+    def toggle_fullscreen(event=None):
+        current_state = root.state()
+        if current_state == 'zoomed':
+            root.state('normal')  # 退出全屏
+            print("[INFO] 已退出全屏模式")
+        else:
+            root.state('zoomed')  # 进入全屏
+            print("[INFO] 已进入全屏模式")
+
+    # 绑定F11键切换全屏
+    root.bind('<F11>', toggle_fullscreen)
+
+    # 添加ESC键退出全屏功能
+    def exit_fullscreen(event=None):
+        if root.state() == 'zoomed':
+            root.state('normal')
+            print("[INFO] 按ESC键退出全屏模式")
+
+    root.bind('<Escape>', exit_fullscreen)
 
     # 运行主循环
     root.mainloop()
