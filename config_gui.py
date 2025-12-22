@@ -43,6 +43,15 @@ class SimpleFEMConfigGUI:
         self.current_image_sequence = []  # 当前序列的图片列表
         self.current_image_index = -1     # 当前图片在序列中的索引
 
+        # ROI1画布拖拽移动相关
+        self.roi1_pan_offset_x = tk.IntVar(value=0)  # ROI1画布X轴平移偏移量
+        self.roi1_pan_offset_y = tk.IntVar(value=0)  # ROI1画布Y轴平移偏移量
+        self.is_panning = False  # 是否正在拖拽
+        self.pan_start_x = 0  # 拖拽开始时的鼠标X坐标
+        self.pan_start_y = 0  # 拖拽开始时的鼠标Y坐标
+        self.pan_start_offset_x = 0  # 拖拽开始时的X偏移量
+        self.pan_start_offset_y = 0  # 拖拽开始时的Y偏移量
+
         # 阈值提取测试相关
         self.threshold_lower_var = tk.IntVar(value=140)
         self.threshold_upper_var = tk.IntVar(value=255)
@@ -510,6 +519,14 @@ class SimpleFEMConfigGUI:
         self.roi_canvas.bind("<Button-5>", self.on_roi_canvas_mousewheel)  # Linux 向下滚轮
         self.roi_canvas.bind("<Control-Button-4>", self.on_roi_canvas_mousewheel_reset)  # Linux Ctrl+向上滚轮重置
         self.roi_canvas.bind("<Control-Button-5>", self.on_roi_canvas_mousewheel_reset)  # Linux Ctrl+向下滚轮重置
+
+        # 绑定ROI1画布拖拽移动事件（鼠标滚轮按下拖拽）
+        self.roi_canvas.bind("<Button-2>", self.on_roi_canvas_pan_start)  # 鼠标滚轮按下
+        self.roi_canvas.bind("<B2-Motion>", self.on_roi_canvas_pan_motion)  # 按住滚轮拖拽
+        self.roi_canvas.bind("<ButtonRelease-2>", self.on_roi_canvas_pan_end)  # 释放滚轮
+
+        # 绑定双击事件重置位置
+        self.roi_canvas.bind("<Double-Button-1>", self.on_roi_canvas_reset_position)  # 双击左键重置位置
 
         # 在ROI1画布下方添加固定的像素信息显示框
         pixel_info_frame = ttk.Frame(roi_frame)
@@ -1174,15 +1191,28 @@ class SimpleFEMConfigGUI:
         # 转换为PhotoImage并显示
         self.roi1_photo = ImageTk.PhotoImage(display_image)
 
-        # 居中显示ROI1图片作为背景
+        # 计算居中位置和基本偏移量
+        center_x = canvas_width // 2
+        center_y = canvas_height // 2
         x_offset = (canvas_width - display_width) // 2
         y_offset = (canvas_height - display_height) // 2
 
+        # 应用平移偏移量
+        pan_offset_x = self.roi1_pan_offset_x.get()
+        pan_offset_y = self.roi1_pan_offset_y.get()
+
+        final_x = center_x + pan_offset_x
+        final_y = center_y + pan_offset_y
+
         self.roi_canvas.create_image(
-            canvas_width // 2, canvas_height // 2,
+            final_x, final_y,
             image=self.roi1_photo,
             anchor=tk.CENTER
         )
+
+        # 更新x_offset和y_offset以包含平移偏移量（用于ROI绘制）
+        x_offset += pan_offset_x
+        y_offset += pan_offset_y
 
         # ROI1中心点作为交点（在ROI1坐标系中的坐标）
         center_x = roi1_width // 2
@@ -1850,6 +1880,108 @@ class SimpleFEMConfigGUI:
                 self.status_var.set(no_image_msg)
         except Exception as e:
             print(f"[ERROR] 鼠标离开事件处理失败: {e}")
+
+    def on_roi_canvas_pan_start(self, event):
+        """处理ROI1画布的拖拽开始事件（鼠标滚轮按下）"""
+        try:
+            # 确保有ROI1图片
+            if not self.roi1_image:
+                return
+
+            # 开始拖拽
+            self.is_panning = True
+            self.pan_start_x = event.x
+            self.pan_start_y = event.y
+            self.pan_start_offset_x = self.roi1_pan_offset_x.get()
+            self.pan_start_offset_y = self.roi1_pan_offset_y.get()
+
+            # 改变鼠标光标
+            self.roi_canvas.config(cursor="fleur")
+
+        except Exception as e:
+            print(f"[ERROR] 拖拽开始事件处理失败: {e}")
+
+    def on_roi_canvas_pan_motion(self, event):
+        """处理ROI1画布的拖拽移动事件（按住滚轮拖拽）"""
+        try:
+            if not self.is_panning or not self.roi1_image:
+                return
+
+            # 计算拖拽偏移量
+            delta_x = event.x - self.pan_start_x
+            delta_y = event.y - self.pan_start_y
+
+            # 更新平移偏移量
+            new_offset_x = self.pan_start_offset_x + delta_x
+            new_offset_y = self.pan_start_offset_y + delta_y
+
+            self.roi1_pan_offset_x.set(new_offset_x)
+            self.roi1_pan_offset_y.set(new_offset_y)
+
+            # 更新ROI可视化（包括叠加层）
+            self.update_roi_visualization()
+
+            # 更新叠加层显示
+            if hasattr(self, 'heatmap_mode') and self.heatmap_mode and self.heat_map is not None:
+                self.update_heat_map_overlay()
+            elif self.overlay_enabled.get() and hasattr(self, 'current_overlay_image') and self.current_overlay_image:
+                self.update_overlay()
+
+            # 显示拖拽信息
+            pan_info = f"平移: X={new_offset_x}, Y={new_offset_y}"
+            self.status_var.set(pan_info)
+
+        except Exception as e:
+            print(f"[ERROR] 拖拽移动事件处理失败: {e}")
+
+    def on_roi_canvas_pan_end(self, event):
+        """处理ROI1画布的拖拽结束事件（释放滚轮）"""
+        try:
+            if not self.is_panning:
+                return
+
+            # 结束拖拽
+            self.is_panning = False
+
+            # 恢复鼠标光标
+            self.roi_canvas.config(cursor="")
+
+            # 显示最终偏移量信息
+            final_offset_x = self.roi1_pan_offset_x.get()
+            final_offset_y = self.roi1_pan_offset_y.get()
+
+            if final_offset_x != 0 or final_offset_y != 0:
+                self.status_var.set(f"平移完成: X={final_offset_x}, Y={final_offset_y}")
+            else:
+                self.status_var.set("ROI1显示位置已重置")
+
+        except Exception as e:
+            print(f"[ERROR] 拖拽结束事件处理失败: {e}")
+
+    def on_roi_canvas_reset_position(self, event):
+        """处理ROI1画布双击事件，重置图片位置到居中"""
+        try:
+            if not self.roi1_image:
+                return
+
+            # 重置平移偏移量
+            self.roi1_pan_offset_x.set(0)
+            self.roi1_pan_offset_y.set(0)
+
+            # 更新ROI可视化（包括叠加层）
+            self.update_roi_visualization()
+
+            # 更新叠加层显示
+            if hasattr(self, 'heatmap_mode') and self.heatmap_mode and self.heat_map is not None:
+                self.update_heat_map_overlay()
+            elif self.overlay_enabled.get() and hasattr(self, 'current_overlay_image') and self.current_overlay_image:
+                self.update_overlay()
+
+            # 显示重置信息
+            self.status_var.set("ROI1位置已重置到居中")
+
+        except Exception as e:
+            print(f"[ERROR] 位置重置事件处理失败: {e}")
 
     def on_threshold_submit(self):
         """处理阈值提取提交"""
@@ -2532,9 +2664,20 @@ class SimpleFEMConfigGUI:
                 # 转换缩放后的叠加图像为PhotoImage
                 overlay_photo = ImageTk.PhotoImage(scaled_overlay)
 
-                # 在画布上绘制叠加（居中显示）
+                # 计算叠加层居中位置并应用平移偏移量
+                center_x = canvas_width // 2
+                center_y = canvas_height // 2
+
+                # 应用与ROI1图像相同的平移偏移量
+                pan_offset_x = self.roi1_pan_offset_x.get()
+                pan_offset_y = self.roi1_pan_offset_y.get()
+
+                overlay_x = center_x + pan_offset_x
+                overlay_y = center_y + pan_offset_y
+
+                # 在画布上绘制叠加（应用平移）
                 self.roi_canvas.create_image(
-                    canvas_width // 2, canvas_height // 2,
+                    overlay_x, overlay_y,
                     image=overlay_photo,
                     anchor=tk.CENTER,
                     tags="overlay"
