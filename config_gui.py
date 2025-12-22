@@ -133,6 +133,13 @@ class SimpleFEMConfigGUI:
         # ROI3覆盖标签页
         self.create_roi3_override_tab()
 
+        # 默认选中ROI配置页签（索引为1）
+        try:
+            self.notebook.select(1)  # ROI配置是第二个页签（索引从0开始）
+            print("[DEBUG] 默认选中ROI配置页签")
+        except Exception as e:
+            print(f"[WARNING] 设置默认页签失败: {e}")
+
         row += 1
 
         # 底部状态栏
@@ -1084,11 +1091,18 @@ class SimpleFEMConfigGUI:
             roi3_top = int(self.roi_vars.get("roi_capture.roi3_config.extension_params.top", tk.StringVar()).get() or 70)
             roi3_bottom = int(self.roi_vars.get("roi_capture.roi3_config.extension_params.bottom", tk.StringVar()).get() or 30)
 
-            return {
+            roi_config = {
                 'roi1': (roi1_x1, roi1_y1, roi1_x2, roi1_y2),
                 'roi2': (roi2_left, roi2_right, roi2_top, roi2_bottom),
                 'roi3': (roi3_left, roi3_right, roi3_top, roi3_bottom)
             }
+
+            # 验证ROI3配置（如果有ROI1图像）
+            if self.roi1_image:
+                roi1_size = self.roi1_image.size
+                roi_config = self.validate_roi3_configuration(roi_config, roi1_size)
+
+            return roi_config
         except (ValueError, AttributeError):
             # 如果配置无效，返回默认值
             return {
@@ -1096,6 +1110,72 @@ class SimpleFEMConfigGUI:
                 'roi2': (20, 30, 60, 20),
                 'roi3': (30, 40, 70, 30)
             }
+
+    def validate_roi3_configuration(self, roi_config, roi1_size):
+        """验证和调整ROI3配置以匹配ROI1尺寸"""
+        try:
+            roi1_width, roi1_height = roi1_size
+            center_x, center_y = roi1_width // 2, roi1_height // 2
+
+            # 确保roi3参数存在
+            if 'roi3' not in roi_config:
+                print("[WARNING] ROI3配置缺失，使用默认值")
+                roi_config['roi3'] = (30, 40, 70, 30)
+                return roi_config
+
+            roi3_params = roi_config['roi3']
+            left, right, top, bottom = roi3_params
+
+            # 检查ROI3是否会超出ROI1边界
+            total_width = left + right
+            total_height = top + bottom
+
+            max_safe_width = min(center_x, roi1_width - center_x) * 2
+            max_safe_height = min(center_y, roi1_height - center_y) * 2
+
+            adjustments_made = []
+
+            # 自动调整超出边界的参数
+            if total_width > max_safe_width and max_safe_width > 0:
+                scale_factor = max_safe_width / total_width
+                left = int(left * scale_factor)
+                right = int(right * scale_factor)
+                adjustments_made.append(f"宽度缩放至{scale_factor:.2f}")
+
+            if total_height > max_safe_height and max_safe_height > 0:
+                scale_factor = max_safe_height / total_height
+                top = int(top * scale_factor)
+                bottom = int(bottom * scale_factor)
+                adjustments_made.append(f"高度缩放至{scale_factor:.2f}")
+
+            # 确保最小尺寸
+            min_size = 10
+            if left + right < min_size:
+                left = max(5, left)
+                right = max(5, right)
+                adjustments_made.append("应用最小宽度")
+
+            if top + bottom < min_size:
+                top = max(5, top)
+                bottom = max(5, bottom)
+                adjustments_made.append("应用最小高度")
+
+            if adjustments_made:
+                print(f"[INFO] ROI3配置已自动调整: {', '.join(adjustments_made)}")
+                print(f"[INFO] 调整后ROI3参数: left={left}, right={right}, top={top}, bottom={bottom}")
+
+                # 更新配置（可选，如果需要保存）
+                roi_config['roi3'] = (left, right, top, bottom)
+            else:
+                print(f"[DEBUG] ROI3配置验证通过: left={left}, right={right}, top={top}, bottom={bottom}")
+
+            return roi_config
+
+        except Exception as e:
+            print(f"[ERROR] ROI3配置验证失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return roi_config
 
     def update_roi_visualization(self):
         """更新ROI可视化"""
@@ -2381,7 +2461,7 @@ class SimpleFEMConfigGUI:
         }
 
     def extract_roi3_from_roi1(self, roi1_image, roi_config):
-        """从ROI1图像中提取ROI3区域"""
+        """从ROI1图像中提取ROI3区域（优化边界处理）"""
         try:
             if roi1_image is None:
                 return None, None
@@ -2400,17 +2480,54 @@ class SimpleFEMConfigGUI:
             top = roi3_params[2]    # 上扩展
             bottom = roi3_params[3]  # 下扩展
 
-            # 计算ROI3区域坐标
+            # 计算ROI3区域坐标（不立即裁剪）
             roi3_left = center_x - left
             roi3_top = center_y - top
             roi3_right = center_x + right
             roi3_bottom = center_y + bottom
 
-            # 确保坐标在图像边界内
+            # 记录原始计算尺寸（用于调试）
+            original_width = roi3_right - roi3_left
+            original_height = roi3_bottom - roi3_top
+            print(f"[DEBUG] ROI3原始坐标: ({roi3_left}, {roi3_top}, {roi3_right}, {roi3_bottom})")
+            print(f"[DEBUG] ROI3原始尺寸: {original_width} x {original_height}")
+
+            # 温和的边界检查：允许边界外扩1-2像素作为缓冲
+            buffer = 2  # 2像素缓冲区
+            roi3_left = max(-buffer, roi3_left)
+            roi3_top = max(-buffer, roi3_top)
+            roi3_right = min(roi1_width + buffer, roi3_right)
+            roi3_bottom = min(roi1_height + buffer, roi3_bottom)
+
+            # 如果ROI3完全超出ROI1范围，使用中心最小区域
+            if roi3_right <= 0 or roi3_left >= roi1_width or roi3_bottom <= 0 or roi3_top >= roi1_height:
+                print("[WARNING] ROI3区域完全超出ROI1，使用中心最小区域")
+                min_size = 20
+                roi3_left = max(0, center_x - min_size // 2)
+                roi3_right = min(roi1_width, center_x + min_size // 2)
+                roi3_top = max(0, center_y - min_size // 2)
+                roi3_bottom = min(roi1_height, center_y + min_size // 2)
+
+            # 最终边界确保（严格，防止越界）
             roi3_left = max(0, roi3_left)
             roi3_top = max(0, roi3_top)
             roi3_right = min(roi1_width, roi3_right)
             roi3_bottom = min(roi1_height, roi3_bottom)
+
+            # 记录实际使用的坐标
+            actual_width = roi3_right - roi3_left
+            actual_height = roi3_bottom - roi3_top
+            print(f"[DEBUG] ROI3实际坐标: ({roi3_left}, {roi3_top}, {roi3_right}, {roi3_bottom})")
+            print(f"[DEBUG] ROI3实际尺寸: {actual_width} x {actual_height}")
+
+            # 检查尺寸变化
+            if actual_width < original_width or actual_height < original_height:
+                print(f"[INFO] ROI3边界被裁剪: 宽度损失{original_width-actual_width}, 高度损失{original_height-actual_height}")
+
+            # 验证ROI3尺寸有效性
+            if actual_width <= 0 or actual_height <= 0:
+                print(f"[ERROR] 无效的ROI3尺寸: {actual_width} x {actual_height}")
+                return None, None
 
             # 提取ROI3区域
             roi3_region = roi1_image.crop((roi3_left, roi3_top, roi3_right, roi3_bottom))
@@ -2466,30 +2583,71 @@ class SimpleFEMConfigGUI:
             else:
                 roi3_gray = roi3_image
 
-            # 转换为numpy数组
-            roi3_array = np.array(roi3_gray)
+            # 转换为numpy数组 (0-255范围，uint8类型)
+            roi3_array = np.array(roi3_gray, dtype=np.uint8)
 
-            # 创建RGB彩色热力图
-            heat_map = np.zeros((roi3_array.shape[0], roi3_array.shape[1], 3), dtype=np.uint8)
+            # 尝试使用OpenCV的COLORMAP_JET实现256级连续渐变
+            try:
+                import cv2
+                # COLORMAP_JET: 蓝(低值) → 青绿 → 黄 → 橙 → 红(高值)
+                colored_heatmap = cv2.applyColorMap(roi3_array, cv2.COLORMAP_JET)
+                # 转换为RGB格式 (OpenCV使用BGR)
+                heat_map_rgb = cv2.cvtColor(colored_heatmap, cv2.COLOR_BGR2RGB)
+                return heat_map_rgb
 
-            # 定义颜色映射分段点：蓝(0-63)→黄(64-127)→橙(128-191)→红(192-255)
-            blue_mask = roi3_array <= 63
-            yellow_mask = (roi3_array >= 64) & (roi3_array <= 127)
-            orange_mask = (roi3_array >= 128) & (roi3_array <= 191)
-            red_mask = roi3_array >= 192
-
-            # 应用颜色映射
-            heat_map[blue_mask] = [0, 0, 255]      # 蓝色
-            heat_map[yellow_mask] = [255, 255, 0]  # 黄色
-            heat_map[orange_mask] = [255, 165, 0]  # 橙色
-            heat_map[red_mask] = [255, 0, 0]      # 红色
-
-            return heat_map
+            except ImportError:
+                print("[WARNING] OpenCV不可用，使用备用的连续渐变算法")
+                # 备用方案：使用numpy插值实现连续渐变
+                return self._apply_continuous_heatmap_fallback(roi3_array)
 
         except Exception as e:
             print(f"[ERROR] 热力图生成失败: {e}")
             import traceback
             traceback.print_exc()
+            return None
+
+    def _apply_continuous_heatmap_fallback(self, roi3_array):
+        """使用numpy插值实现连续热力图（备用方案）"""
+        try:
+            import numpy as np
+
+            # 定义渐变控制点 (蓝 -> 青绿 -> 黄 -> 橙 -> 红)
+            # 保持与COLORMAP_JET相似的颜色方向：蓝(低) -> 红(高)
+            control_points = {
+                0:   [0, 0, 255],      # 纯蓝
+                64:  [0, 255, 255],    # 青绿
+                128: [255, 255, 0],    # 黄色
+                192: [255, 128, 0],    # 橙色
+                255: [255, 0, 0]       # 红色
+            }
+
+            # 创建连续渐变映射
+            heat_map = np.zeros((roi3_array.shape[0], roi3_array.shape[1], 3), dtype=np.uint8)
+
+            # 为每个灰度值计算对应的颜色
+            for gray_value in range(256):
+                # 找到gray_value所在的区间
+                keys = sorted(control_points.keys())
+                lower_key = max([k for k in keys if k <= gray_value])
+                upper_key = min([k for k in keys if k >= gray_value])
+
+                if lower_key == upper_key:
+                    # 正好在控制点上
+                    color = control_points[lower_key]
+                else:
+                    # 线性插值
+                    ratio = (gray_value - lower_key) / (upper_key - lower_key)
+                    lower_color = np.array(control_points[lower_key])
+                    upper_color = np.array(control_points[upper_key])
+                    color = lower_color + ratio * (upper_color - lower_color)
+
+                # 应用到对应灰度值的像素
+                heat_map[roi3_array == gray_value] = color.astype(np.uint8)
+
+            return heat_map
+
+        except Exception as e:
+            print(f"[ERROR] 备用热力图算法失败: {e}")
             return None
 
     def analyze_connected_components(self, threshold_mask):
@@ -2574,10 +2732,10 @@ class SimpleFEMConfigGUI:
             return None
 
     def create_heat_map_overlay_image(self, base_image, heat_map, roi3_coords, alpha=0.6):
-        """创建热力图叠加图像用于画布显示"""
+        """创建热力图叠加图像用于画布显示（优化版）"""
         try:
             import numpy as np
-            from PIL import ImageDraw
+            from PIL import Image, ImageDraw
 
             if heat_map is None or roi3_coords is None:
                 return None
@@ -2589,23 +2747,80 @@ class SimpleFEMConfigGUI:
             roi3_width = roi3_right - roi3_left
             roi3_height = roi3_bottom - roi3_top
 
-            # 将热力图调整为ROI3尺寸
-            heat_map_pil = Image.fromarray(heat_map)
-            heat_map_resized = heat_map_pil.resize((roi3_width, roi3_height), Image.Resampling.NEAREST)
+            # 验证ROI3尺寸
+            if roi3_width <= 0 or roi3_height <= 0:
+                print(f"[WARNING] 无效的ROI3尺寸: {roi3_width} x {roi3_height}")
+                return None
 
-            # 转换为RGBA并添加透明度
+            # 将热力图转换为PIL图像
+            if isinstance(heat_map, np.ndarray):
+                heat_map_pil = Image.fromarray(heat_map)
+            else:
+                heat_map_pil = heat_map
+
+            # 根据尺寸差异选择合适的插值方法
+            original_size = heat_map_pil.size
+            target_size = (roi3_width, roi3_height)
+
+            # 如果尺寸差异较大，使用高质量插值
+            size_diff = abs(original_size[0] - roi3_width) + abs(original_size[1] - roi3_height)
+            if size_diff > 2:
+                resample_method = Image.Resampling.LANCZOS  # 尺寸差异大时使用高质量插值
+                print(f"[DEBUG] 热力图缩放: {original_size} -> {target_size} (LANCZOS)")
+            else:
+                resample_method = Image.Resampling.NEAREST  # 尺寸接近时使用最近邻插值
+                print(f"[DEBUG] 热力图缩放: {original_size} -> {target_size} (NEAREST)")
+
+            # 调整热力图尺寸到ROI3大小
+            try:
+                heat_map_resized = heat_map_pil.resize(target_size, resample_method)
+            except Exception as resize_error:
+                print(f"[WARNING] 热力图缩放失败，尝试备用方法: {resize_error}")
+                # 备用方法：使用简单的resize
+                heat_map_resized = heat_map_pil.resize(target_size)
+
+            # 转换为RGBA
             heat_map_rgba = heat_map_resized.convert('RGBA')
 
-            # 创建透明度蒙版
-            alpha_array = np.full((roi3_height, roi3_width), int(255 * alpha), dtype=np.uint8)
-            alpha_pil = Image.fromarray(alpha_array)
+            # 创建透明度蒙版（支持渐变透明）
+            if isinstance(alpha, (int, float)):
+                # 均匀透明度
+                alpha_array = np.full((roi3_height, roi3_width), int(255 * alpha), dtype=np.uint8)
+                alpha_pil = Image.fromarray(alpha_array)
+            elif isinstance(alpha, np.ndarray) and alpha.shape == (roi3_height, roi3_width):
+                # 渐变透明度蒙版
+                alpha_pil = Image.fromarray((alpha * 255).astype(np.uint8))
+            else:
+                # 默认60%透明度
+                alpha_array = np.full((roi3_height, roi3_width), 153, dtype=np.uint8)
+                alpha_pil = Image.fromarray(alpha_array)
+                print(f"[WARNING] 无效的alpha值类型 {type(alpha)}，使用默认60%透明度")
 
             # 将alpha通道应用到热力图
             r, g, b, a = heat_map_rgba.split()
             heat_map_with_alpha = Image.merge('RGBA', (r, g, b, alpha_pil))
 
-            # 将热力图叠加到基础图像上
-            overlay.paste(heat_map_with_alpha, (roi3_left, roi3_top), heat_map_with_alpha)
+            # 将热力图叠加到基础图像上（增强错误处理）
+            try:
+                overlay.paste(heat_map_with_alpha, (roi3_left, roi3_top), heat_map_with_alpha)
+                print(f"[DEBUG] 热力图叠加成功: 位置({roi3_left}, {roi3_top}), 尺寸{target_size}")
+            except Exception as paste_error:
+                print(f"[WARNING] 热力图叠加失败，尝试边界检查: {paste_error}")
+                # 尝试调整粘贴位置以适应边界
+                safe_left = max(0, roi3_left)
+                safe_top = max(0, roi3_top)
+                safe_right = min(base_image.width, roi3_left + roi3_width)
+                safe_bottom = min(base_image.height, roi3_top + roi3_height)
+
+                if safe_right > safe_left and safe_bottom > safe_top:
+                    crop_width = safe_right - safe_left
+                    crop_height = safe_bottom - safe_top
+                    cropped_heatmap = heat_map_with_alpha.crop((0, 0, crop_width, crop_height))
+                    overlay.paste(cropped_heatmap, (safe_left, safe_top), cropped_heatmap)
+                    print(f"[INFO] 热力图已调整并叠加: ({safe_left}, {safe_top}, {safe_right}, {safe_bottom})")
+                else:
+                    print(f"[ERROR] ROI3区域无法叠加到画布")
+                    return None
 
             return overlay
 
