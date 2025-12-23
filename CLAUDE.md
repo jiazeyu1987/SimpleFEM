@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 SimpleFEM is a standalone ROI (Region of Interest) capture and peak detection daemon for the NHEM (New HEM Monitor) medical signal processing system. It operates independently from the main NHEM system, providing focused analysis capabilities for HEM (高回声事件 - High Echo Event) detection through computer vision and signal processing. The system features dual input modes (screen capture and video file processing) with medical-grade reliability and comprehensive data export capabilities.
 
+### Key System Concepts
+
+- **ROI1**: Large capture region (default: 1280x80 to 1920x980) for green line detection and peak detection
+- **ROI2**: Small region extracted around green line intersection or vein tracking (default: ~80x120 pixels)
+- **ROI3**: Extended vertical region for additional color classification validation
+- **Green/Red Classification**: Peaks classified as GREEN when (post_peak_avg - pre_peak_avg) >= difference_threshold, otherwise RED
+- **Hybrid Detection**: ROI1 detects peaks, ROI2 performs color classification (configurable via `hybrid_detection.enabled`)
+
 ## Development Commands
 
 ### Running SimpleFEM
@@ -66,6 +74,27 @@ python test_multi_video_fix.py
 python diagnose_basic.py
 python debug_wave1.py
 python analyze_roi2_jitter.py
+
+# Test frame difference and signal validation
+python simple_frame_diff_test.py
+python proper_frame_diff_test.py
+python extreme_frame_diff_test.py
+python correct_signal_test.py
+python create_test_sequence.py
+
+# Test ROI2 sampling window and anti-jitter
+python test_roi2_sampling_window.py
+python check_jitter_simple.py
+python final_filter_test.py
+```
+
+### Python Dependencies
+```bash
+# Core dependencies (already bundled in executable)
+pip install numpy opencv-python Pillow matplotlib
+
+# Optional: For development and testing
+pip install pyinstaller  # For building standalone executable
 ```
 
 ### Configuration Management
@@ -422,3 +451,64 @@ While SimpleFEM operates independently, it integrates with the broader NHEM syst
 - **Windows-Specific**: Screen capture functionality requires Windows platform
 - **Resource Management**: Automatic cleanup of memory, file handles, and video resources
 - **Thread Safety**: Concurrent operations with proper synchronization mechanisms
+
+## Common Development Issues and Solutions
+
+### Debugging Peak Detection
+When peak detection is not working as expected:
+1. **Check Threshold Values**: The `threshold` in config may be too high/low for your video content
+2. **Enable ROI1 Waveform Saving**: Set `save_roi1_wave: true` to visualize ROI1 waveform data
+3. **Verify Green Line Detection**: Check if ROI1 coordinates align with actual green line position
+4. **Review Adaptive Threshold**: If enabled, check `adaptive_window_seconds` and `threshold_over_mean_ratio`
+5. **Use Diagnostic Scripts**: Run `diagnose_basic.py` to verify basic signal processing pipeline
+
+### ROI2 Jitter Issues
+If ROI2 region is unstable or jumping:
+1. **Enable Anti-Jitter**: Set `roi2_anti_jitter.enabled: true` in config
+2. **Adjust Movement Threshold**: Increase `roi2_anti_jitter.movement_threshold` for more aggressive filtering
+3. **Check EMA Settings**: For algorithm='ema', tune `alpha` (lower = more smoothing)
+4. **Verify Green Line Detection**: Instability often originates from upstream green line detection
+
+### CSV Export Issues
+When CSV exports are missing or incomplete:
+1. **Check Deduplication**: Peaks may be filtered by `consecutive_frame_window` or `cross_color_deduplication_enabled`
+2. **Verify Only-Detect Mode**: If `only_delect: true`, only frames with peaks generate output files
+3. **Review Color Priority**: Green peaks (priority 2) override red peaks (priority 1) in deduplication
+4. **Check Export Directory**: CSV files are written to `export/` folder with `peak_statistics_*.csv` naming
+
+### Video Processing Problems
+For video playback or processing issues:
+1. **Video Path Configuration**: `video_path` can be a single file or directory (processes all videos)
+2. **OpenCV Codec**: Ensure your OpenCV build supports the video codec (H.264 recommended)
+3. **Frame Rate Override**: Use `processing_frame_rate` to limit processing speed
+4. **Loop Mode**: `loop_enabled: true` will restart video when complete
+
+### Multi-Video Batch Processing
+To process multiple videos sequentially:
+1. **Set Video Path as Directory**: `video_path: "video"` will process all files in that folder
+2. **Session Management**: Each video generates a new session with unique ID
+3. **CSV Naming**: Format includes video name: `peak_statistics_{video_name}_{timestamp}.csv`
+4. **Auto-Cleanup**: `startup_cleanup.enabled: true` clears old data between runs
+
+## Configuration Quick Reference
+
+### Key Parameters for Tuning
+| Parameter | Location | Purpose | Typical Range |
+|-----------|----------|---------|---------------|
+| `threshold` | `peak_detection.threshold` | Base detection threshold | 30-100 (depends on video) |
+| `difference_threshold` | `peak_detection.difference_threshold` | Green/red classification | 1.5-3.0 |
+| `frame_rate` | `roi_capture.frame_rate` | Capture/processing speed | 5-30 FPS |
+| `consecutive_frame_window` | `deduplication.consecutive_frame_window` | Peak deduplication | 10-50 frames |
+| `movement_threshold` | `roi2_anti_jitter.movement_threshold` | ROI2 stability | 10-30 pixels |
+
+### Mode Switching
+Change `processing_mode` in `simple_fem_config.json`:
+- `"screen"`: Real-time screen capture (requires PIL.ImageGrab)
+- `"video"`: Process video file(s) from `video_path`
+- `"vein_following"`: Automatic vein tracking mode
+
+### Important Constraints
+- **ROI1 must contain visible green line** for intersection detection to work
+- **ROI2 coordinates are relative to ROI1**, not absolute screen coordinates
+- **Circular buffer size is fixed at 100 frames** - affects memory and detection window
+- **Environment variables use NHEM_ prefix** and override JSON config values

@@ -138,6 +138,7 @@ class SafePeakStatistics:
                     'bg_mean',
                     'peak_max_value',
                     'roi3_peak_max_value',
+                    'roi3_peak_max_frame',
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -367,15 +368,22 @@ class SafePeakStatistics:
 
         # 计算波峰区域最大值（用于连续同色去重）
         frame_diff = post_avg - pre_avg
-        peak_max_value = self._get_peak_max_value(curve, start_frame, end_frame)
+        peak_max_value, peak_max_frame = self._get_peak_max_value(curve, start_frame, end_frame)
 
         # ROI3 peak max calculation and override logic
         roi3_peak_max_value = 0.0
+        roi3_peak_max_frame = -1
         roi3_override_applied = False
         final_peak_type = peak_type
 
         if roi3_curve and roi3_override_enabled:
-            roi3_peak_max_value = self._get_peak_max_value(roi3_curve, start_frame, end_frame)
+            roi3_peak_max_value, roi3_max_curve_idx = self._get_peak_max_value(roi3_curve, start_frame, end_frame)
+
+            # 将curve中的索引转换为全局总帧数
+            # frame_index是当前帧的全局索引，curve长度是循环缓冲区大小
+            # curve[0]对应的全局帧 = frame_index - len(curve) + 1
+            curve_start_global_frame = frame_index - len(curve) + 1
+            roi3_peak_max_frame = curve_start_global_frame + roi3_max_curve_idx if roi3_max_curve_idx >= 0 else -1
 
             # Apply ROI3 override logic: RED -> GREEN if ROI3 peak max > threshold
             if peak_type == "red" and roi3_peak_max_value > roi3_override_threshold:
@@ -393,6 +401,7 @@ class SafePeakStatistics:
             'bg_mean': round(float(bg_mean), 3) if bg_mean is not None else 0.0,
             'peak_max_value': round(peak_max_value, 2),  # ROI2 peak max
             'roi3_peak_max_value': round(roi3_peak_max_value, 2),
+            'roi3_peak_max_frame': roi3_peak_max_frame,  # ROI3最大值对应的全局帧索引
             'roi3_override_applied': roi3_override_applied,
             'roi3_override_threshold': round(float(roi3_override_threshold), 3)
         }
@@ -470,24 +479,32 @@ class SafePeakStatistics:
             post_avg = sum(post_values) / len(post_values) if post_values else 0.0
 
         # 计算ROI1和ROI2在波峰区间的最大值
-        roi2_peak_max = self._get_peak_max_value(roi2_curve, start_frame, end_frame)
+        roi2_peak_max, _ = self._get_peak_max_value(roi2_curve, start_frame, end_frame)
         roi1_peak_max = 0.0
         if roi1_curve:
-            roi1_peak_max = self._get_peak_max_value(roi1_curve, start_frame, end_frame)
+            roi1_peak_max, _ = self._get_peak_max_value(roi1_curve, start_frame, end_frame)
 
         # 计算ROI3在波峰区间的最大值并应用覆盖逻辑
         roi3_peak_max = 0.0
+        roi3_peak_max_frame = -1
         roi3_override_applied = False
         final_peak_type = color
 
         if roi3_curve and roi3_override_enabled:
-            roi3_peak_max = self._get_peak_max_value(roi3_curve, start_frame, end_frame)
+            roi3_peak_max, roi3_max_curve_idx = self._get_peak_max_value(roi3_curve, start_frame, end_frame)
+
+            # 将curve中的索引转换为全局总帧数
+            # frame_index是当前帧的全局索引，curve长度是循环缓冲区大小
+            # curve[0]对应的全局帧 = frame_index - len(curve) + 1
+            # 注意：这里使用roi2_curve的长度作为参考（所有缓冲区大小一致）
+            curve_start_global_frame = frame_index - len(roi2_curve) + 1
+            roi3_peak_max_frame = curve_start_global_frame + roi3_max_curve_idx if roi3_max_curve_idx >= 0 else -1
 
             # 应用ROI3覆盖逻辑: RED -> GREEN 如果ROI3峰值 > 阈值
             if final_peak_type == "red" and roi3_peak_max > roi3_override_threshold:
                 final_peak_type = "green"
                 roi3_override_applied = True
-                print(f"[DEBUG] ROI3 override applied: frame={frame_index}, red->green, roi3_max={roi3_peak_max:.2f}")
+                print(f"[DEBUG] ROI3 override applied: frame={frame_index}, red->green, roi3_max={roi3_peak_max:.2f}, roi3_global_frame={roi3_peak_max_frame}")
 
         # 创建混合检测特有数据结构
         hybrid_data = {
@@ -502,6 +519,7 @@ class SafePeakStatistics:
             'bg_mean': round(float(bg_mean), 3) if bg_mean is not None else 0.0,
             'peak_max_value': round(roi2_peak_max, 2),
             'roi3_peak_max_value': round(roi3_peak_max, 2),
+            'roi3_peak_max_frame': roi3_peak_max_frame,  # ROI3最大值对应的帧索引
 
             # 混合检测特有字段
             'detection_method': 'hybrid',
@@ -713,17 +731,30 @@ class SafePeakStatistics:
             self._add_log(f"检查无效波峰数据失败: {e}", level="ERROR")
             return False
 
-    def _get_peak_max_value(self, curve: List[float], start_frame: int, end_frame: int) -> float:
-        """计算波峰区域的最大灰度值"""
+    def _get_peak_max_value(self, curve: List[float], start_frame: int, end_frame: int) -> Tuple[float, int]:
+        """
+        计算波峰区域的最大灰度值及其对应的帧索引
+
+        Returns:
+            Tuple[float, int]: (最大灰度值, 最大值对应的绝对帧索引)
+        """
         try:
             if start_frame < 0 or end_frame >= len(curve) or start_frame > end_frame:
-                return 0.0
+                return 0.0, -1
 
             peak_region = curve[start_frame:end_frame + 1]
-            return max(peak_region) if peak_region else 0.0
+            if not peak_region:
+                return 0.0, -1
+
+            max_value = max(peak_region)
+            # 找到最大值在peak_region中的相对索引，加上start_frame得到绝对索引
+            relative_index = peak_region.index(max_value)
+            absolute_frame_index = start_frame + relative_index
+
+            return max_value, absolute_frame_index
         except Exception as e:
             self._add_log(f"计算波峰最大值失败: {e}", level="ERROR")
-            return 0.0
+            return 0.0, -1
 
     def _remove_lower_consecutive_peak(self, peak_to_remove: Dict[str, Any]):
         """从统计记录中移除较低的连续同色波峰"""
@@ -797,6 +828,7 @@ class SafePeakStatistics:
                 'bg_mean',
                 'peak_max_value',
                 'roi3_peak_max_value',
+                'roi3_peak_max_frame',
             ]
 
             # 过滤数据，只包含CSV需要的字段
