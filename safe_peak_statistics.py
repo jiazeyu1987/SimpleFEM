@@ -139,6 +139,10 @@ class SafePeakStatistics:
                     'peak_max_value',
                     'roi3_peak_max_value',
                     'roi3_peak_max_frame',
+                    'pre_peak_frame_start',
+                    'pre_peak_frame_end',
+                    'post_peak_frame_start',
+                    'post_peak_frame_end',
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -346,6 +350,9 @@ class SafePeakStatistics:
                          roi3_override_threshold: float = 115.0) -> Dict[str, Any]:
         """创建简化的波峰数据结构（只保留必要字段）"""
 
+        # 计算curve起始帧对应的全局帧索引
+        curve_start_global_frame = frame_index - len(curve) + 1
+
         # 计算前X帧平均值（波峰开始前5帧）
         pre_frames = int(pre_post_avg_frames) if int(pre_post_avg_frames) > 0 else 5
         pre_start = max(0, start_frame - pre_frames)
@@ -356,6 +363,10 @@ class SafePeakStatistics:
             pre_values = curve[pre_start:pre_end + 1]
             pre_avg = sum(pre_values) / len(pre_values) if pre_values else 0.0
 
+        # 前置帧范围的全局帧索引
+        pre_peak_frame_start = curve_start_global_frame + pre_start if pre_start <= pre_end else -1
+        pre_peak_frame_end = curve_start_global_frame + pre_end if pre_start <= pre_end else -1
+
         # 计算后X帧平均值（波峰结束后5帧）
         post_frames = int(pre_post_avg_frames) if int(pre_post_avg_frames) > 0 else 5
         post_start = end_frame + 1
@@ -365,6 +376,10 @@ class SafePeakStatistics:
         if 0 <= post_start <= post_end:
             post_values = curve[post_start:post_end + 1]
             post_avg = sum(post_values) / len(post_values) if post_values else 0.0
+
+        # 后置帧范围的全局帧索引
+        post_peak_frame_start = curve_start_global_frame + post_start if 0 <= post_start <= post_end else -1
+        post_peak_frame_end = curve_start_global_frame + post_end if 0 <= post_start <= post_end else -1
 
         # 计算波峰区域最大值（用于连续同色去重）
         frame_diff = post_avg - pre_avg
@@ -382,7 +397,6 @@ class SafePeakStatistics:
             # 将curve中的索引转换为全局总帧数
             # frame_index是当前帧的全局索引，curve长度是循环缓冲区大小
             # curve[0]对应的全局帧 = frame_index - len(curve) + 1
-            curve_start_global_frame = frame_index - len(curve) + 1
             roi3_peak_max_frame = curve_start_global_frame + roi3_max_curve_idx if roi3_max_curve_idx >= 0 else -1
 
             # Apply ROI3 override logic: RED -> GREEN if ROI3 peak max > threshold
@@ -402,6 +416,10 @@ class SafePeakStatistics:
             'peak_max_value': round(peak_max_value, 2),  # ROI2 peak max
             'roi3_peak_max_value': round(roi3_peak_max_value, 2),
             'roi3_peak_max_frame': roi3_peak_max_frame,  # ROI3最大值对应的全局帧索引
+            'pre_peak_frame_start': pre_peak_frame_start,  # 前置平均值计算的起始帧（全局）
+            'pre_peak_frame_end': pre_peak_frame_end,    # 前置平均值计算的结束帧（全局）
+            'post_peak_frame_start': post_peak_frame_start,  # 后置平均值计算的起始帧（全局）
+            'post_peak_frame_end': post_peak_frame_end,    # 后置平均值计算的结束帧（全局）
             'roi3_override_applied': roi3_override_applied,
             'roi3_override_threshold': round(float(roi3_override_threshold), 3)
         }
@@ -459,6 +477,9 @@ class SafePeakStatistics:
         roi1_frame_diff = hybrid_peak.get('roi1_frame_diff', 0.0)
         roi2_frame_diff = hybrid_peak.get('roi2_frame_diff', 0.0)
 
+        # 计算curve起始帧对应的全局帧索引
+        curve_start_global_frame = frame_index - len(roi2_curve) + 1
+
         # 计算ROI2在波峰区间的前后平均值（与_create_peak_data逻辑一致）
         pre_frames = int(pre_post_avg_frames) if int(pre_post_avg_frames) > 0 else 5
         pre_start = max(0, start_frame - pre_frames)
@@ -469,6 +490,10 @@ class SafePeakStatistics:
             pre_values = roi2_curve[pre_start:pre_end + 1]
             pre_avg = sum(pre_values) / len(pre_values) if pre_values else 0.0
 
+        # 前置帧范围的全局帧索引
+        pre_peak_frame_start = curve_start_global_frame + pre_start if pre_start <= pre_end else -1
+        pre_peak_frame_end = curve_start_global_frame + pre_end if pre_start <= pre_end else -1
+
         post_frames = int(pre_post_avg_frames) if int(pre_post_avg_frames) > 0 else 5
         post_start = end_frame + 1
         post_end = min(len(roi2_curve) - 1, end_frame + post_frames)
@@ -477,6 +502,10 @@ class SafePeakStatistics:
         if 0 <= post_start <= post_end:
             post_values = roi2_curve[post_start:post_end + 1]
             post_avg = sum(post_values) / len(post_values) if post_values else 0.0
+
+        # 后置帧范围的全局帧索引
+        post_peak_frame_start = curve_start_global_frame + post_start if 0 <= post_start <= post_end else -1
+        post_peak_frame_end = curve_start_global_frame + post_end if 0 <= post_start <= post_end else -1
 
         # 计算ROI1和ROI2在波峰区间的最大值
         roi2_peak_max, _ = self._get_peak_max_value(roi2_curve, start_frame, end_frame)
@@ -497,7 +526,6 @@ class SafePeakStatistics:
             # frame_index是当前帧的全局索引，curve长度是循环缓冲区大小
             # curve[0]对应的全局帧 = frame_index - len(curve) + 1
             # 注意：这里使用roi2_curve的长度作为参考（所有缓冲区大小一致）
-            curve_start_global_frame = frame_index - len(roi2_curve) + 1
             roi3_peak_max_frame = curve_start_global_frame + roi3_max_curve_idx if roi3_max_curve_idx >= 0 else -1
 
             # 应用ROI3覆盖逻辑: RED -> GREEN 如果ROI3峰值 > 阈值
@@ -520,6 +548,10 @@ class SafePeakStatistics:
             'peak_max_value': round(roi2_peak_max, 2),
             'roi3_peak_max_value': round(roi3_peak_max, 2),
             'roi3_peak_max_frame': roi3_peak_max_frame,  # ROI3最大值对应的帧索引
+            'pre_peak_frame_start': pre_peak_frame_start,  # 前置平均值计算的起始帧（全局）
+            'pre_peak_frame_end': pre_peak_frame_end,    # 前置平均值计算的结束帧（全局）
+            'post_peak_frame_start': post_peak_frame_start,  # 后置平均值计算的起始帧（全局）
+            'post_peak_frame_end': post_peak_frame_end,    # 后置平均值计算的结束帧（全局）
 
             # 混合检测特有字段
             'detection_method': 'hybrid',
@@ -829,6 +861,10 @@ class SafePeakStatistics:
                 'peak_max_value',
                 'roi3_peak_max_value',
                 'roi3_peak_max_frame',
+                'pre_peak_frame_start',
+                'pre_peak_frame_end',
+                'post_peak_frame_start',
+                'post_peak_frame_end',
             ]
 
             # 过滤数据，只包含CSV需要的字段
