@@ -520,6 +520,72 @@ def compute_average_gray(image: Image.Image) -> float:
     return float(total_sum / total_pixels)
 
 
+def compute_roi3_80_160_normalized(image: Image.Image) -> float:
+    """
+    Compute percentage of pixels with grayscale values in range [80, 160].
+
+    Args:
+        image: PIL Image object (ROI3 region)
+
+    Returns:
+        Percentage of pixels in range [80, 160] (0-100)
+    """
+    gray = image.convert("L")
+    histogram = gray.histogram()
+    width, height = gray.size
+    total_pixels = width * height
+
+    if total_pixels <= 0:
+        return 0.0
+
+    # Sum pixel counts in range [80, 160]
+    pixel_count = sum(histogram[80:161])  # 161 because upper bound is exclusive
+
+    # Return as percentage (0-100)
+    percentage = float((pixel_count / total_pixels) * 100)
+
+    # Debug output
+    print(f"[DEBUG] ROI3 image size: {width}x{height}={total_pixels} pixels, "
+          f"80-160 count={pixel_count}, percentage={percentage:.2f}%")
+
+    return percentage
+
+
+def compute_roi3_g1_g2_ranges(image: Image.Image) -> tuple:
+    """
+    Compute G1 and G2 grayscale range percentages for ROI3 image.
+
+    Args:
+        image: PIL Image object (ROI3 region)
+
+    Returns:
+        Tuple of (G1, G2) percentages:
+        - G1: Percentage of pixels in range [80, 255] (0-100)
+        - G2: Percentage of pixels in range [150, 255] (0-100)
+    """
+    gray = image.convert("L")
+    histogram = gray.histogram()
+    width, height = gray.size
+    total_pixels = width * height
+
+    if total_pixels <= 0:
+        return 0.0, 0.0
+
+    # G1: pixels in range [80, 255]
+    g1_count = sum(histogram[80:256])  # 256 because upper bound is exclusive
+    g1_percentage = float((g1_count / total_pixels) * 100)
+
+    # G2: pixels in range [150, 255]
+    g2_count = sum(histogram[150:256])  # 256 because upper bound is exclusive
+    g2_percentage = float((g2_count / total_pixels) * 100)
+
+    # Debug output with histogram distribution
+    print(f"[DEBUG] ROI3 histogram: total={total_pixels}, G1(80-255)={g1_count}, G2(150-255)={g2_count}")
+
+    return g1_percentage, g2_percentage
+
+
+
 def setup_peak_logger() -> logging.Logger:
     """Create a logger that writes plain text lines and rotates daily."""
     logger = logging.getLogger("roi_peak_daemon")
@@ -637,8 +703,14 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
         peak_width = peak_end - peak_start + 1
 
         # 使用ROI2数据进行颜色判定
+        # 从配置中获取G1/G2曲线
+        roi3_g1_curve = config.get('roi3_g1_curve', None)
+        roi3_g2_curve = config.get('roi3_g2_curve', None)
+
         color_result = determine_roi2_color_in_interval(
-            peak_start, peak_end, roi2_curve, config
+            peak_start, peak_end, roi2_curve, config,
+            roi3_g1_curve=roi3_g1_curve,
+            roi3_g2_curve=roi3_g2_curve
         )
 
         # 检查是否被frame_diff过滤掉
@@ -678,18 +750,28 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
 
 def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                                    roi2_curve: List[float],
-                                   config: Dict[str, Any]) -> Dict[str, Any]:
+                                   config: Dict[str, Any],
+                                   roi3_g1_curve: Optional[List[float]] = None,
+                                   roi3_g2_curve: Optional[List[float]] = None) -> Dict[str, Any]:
     """
-    在ROI1检测的波峰区间内，使用ROI2数据进行颜色判定
+    在ROI1检测的波峰区间内，使用ROI2数据进行颜色判定（支持G1/G2覆盖）
 
     Args:
         peak_start: 波峰开始帧
         peak_end: 波峰结束帧
         roi2_curve: ROI2灰度曲线
         config: 配置参数
+        roi3_g1_curve: ROI3的G1值曲线（与roi2_curve同步）- 可选
+        roi3_g2_curve: ROI3的G2值曲线（与roi2_curve同步）- 可选
 
     Returns:
-        颜色判定结果
+        颜色判定结果字典，包含:
+        - color: 'green' or 'red'
+        - method: 判定方法
+        - confidence: 置信度
+        - g1_g2_override_applied: G1/G2覆盖是否应用（新增）
+        - g1_value: 使用的G1值（新增）
+        - g2_value: 使用的G2值（新增）
     """
     pre_frames = config.get('roi2_pre_frames', 5)
     post_frames = config.get('roi2_post_frames', 10)
@@ -711,7 +793,11 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                     'confidence': 0.0,
                     'frame_difference': 0.0,
                     'roi2_valid': False,
-                    'error': f'ROI2数据不足({roi2_interval_length} < {min_frames})，回退到ROI1'
+                    'error': f'ROI2数据不足({roi2_interval_length} < {min_frames})，回退到ROI1',
+                    # 新增G1/G2字段（默认值）
+                    'g1_g2_override_applied': False,
+                    'g1_value': None,
+                    'g2_value': None,
                 }
             else:
                 return {
@@ -752,6 +838,53 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
 
         color = "green" if frame_difference >= color_threshold else "red"
 
+        # G1/G2 覆盖逻辑（新增）
+        g1_g2_override_applied = False
+        g1_value_used = None
+        g2_value_used = None
+
+        if roi3_g1_curve and roi3_g2_curve:
+            # 读取G1/G2配置
+            g1_g2_conf = config.get("g1_g2_override", {})
+            g1_g2_enabled = bool(g1_g2_conf.get("enabled", True))
+            g1_threshold = float(g1_g2_conf.get("g1_threshold", 98.0))
+            g2_threshold = float(g1_g2_conf.get("g2_threshold", 20.0))
+            use_peak_max = bool(g1_g2_conf.get("use_peak_max", True))
+
+            if g1_g2_enabled and color == "red":
+                # 提取波峰区间的G1/G2值
+                g1_values = []
+                g2_values = []
+
+                for frame_idx in range(peak_start, min(peak_end + 1, len(roi3_g1_curve))):
+                    if frame_idx < len(roi3_g1_curve) and frame_idx < len(roi3_g2_curve):
+                        g1_values.append(roi3_g1_curve[frame_idx])
+                        g2_values.append(roi3_g2_curve[frame_idx])
+
+                # 根据配置选择G1/G2值
+                if g1_values and g2_values:
+                    if use_peak_max:
+                        g1_value = max(g1_values)
+                        g2_value = max(g2_values)
+                    else:
+                        # 使用波峰结束帧的值
+                        g1_value = g1_values[-1] if peak_end < len(roi3_g1_curve) else g1_values[0]
+                        g2_value = g2_values[-1] if peak_end < len(roi3_g2_curve) else g2_values[0]
+
+                    g1_value_used = g1_value
+                    g2_value_used = g2_value
+
+                    # 检查是否满足覆盖条件
+                    if g1_value > g1_threshold and g2_value > g2_threshold:
+                        color = "green"
+                        g1_g2_override_applied = True
+
+                        # 输出覆盖日志
+                        print(f"[G1/G2覆盖] 波峰[{peak_start}-{peak_end}] RED→GREEN: "
+                              f"G1={g1_value:.2f}%, G2={g2_value:.2f}% "
+                              f"(阈值: G1>{g1_threshold}%, G2>{g2_threshold}%)")
+
+
         # 计算置信度
         confidence = min(abs(frame_difference) / max(color_threshold, abs(frame_difference)), 1.0)
 
@@ -777,7 +910,7 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
 
         return {
             'color': color,
-            'method': 'roi2',
+            'method': 'roi2' if not g1_g2_override_applied else 'g1_g2_override',
             'frame_difference': frame_difference,
             'threshold': color_threshold,
             'pre_avg': pre_avg,
@@ -786,7 +919,11 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
             'roi2_valid': True,
             'quality_score': quality_info['quality_score'],
             'variance': quality_info.get('variance', 0.0),
-            'data_range': quality_info.get('data_range', 0.0)
+            'data_range': quality_info.get('data_range', 0.0),
+            # 新增G1/G2字段
+            'g1_g2_override_applied': g1_g2_override_applied,
+            'g1_value': g1_value_used,
+            'g2_value': g2_value_used,
         }
 
     except Exception as e:
@@ -797,7 +934,11 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                 'confidence': 0.0,
                 'frame_difference': 0.0,
                 'roi2_valid': False,
-                'error': f'ROI2计算错误({str(e)})，回退到ROI1'
+                'error': f'ROI2计算错误({str(e)})，回退到ROI1',
+                # 新增G1/G2字段（默认值）
+                'g1_g2_override_applied': False,
+                'g1_value': None,
+                'g2_value': None,
             }
         else:
             return {
@@ -1171,12 +1312,6 @@ def run_daemon() -> None:
         stability_frames = int(protection_conf.get("stability_frames", 5))
         waveform_trigger_enabled = bool(protection_conf.get("waveform_trigger_enabled", True))
 
-        # ROI3 override parameters
-        roi3_override_conf = peak_conf.get("roi3_override", {})
-        roi3_override_enabled = bool(roi3_override_conf.get("enabled", False))
-        roi3_override_threshold = float(roi3_override_conf.get("threshold", 115.0))
-        require_roi3_data = bool(roi3_override_conf.get("require_roi3_data", True))
-
         min_region_length = int(peak_conf.get("min_region_length", 1))
 
         # ROI1 configuration parameters (independent from ROI2)
@@ -1224,6 +1359,17 @@ def run_daemon() -> None:
         roi2_min_variance = float(data_quality_conf.get("roi2_minimum_variance", 0.5))
         fallback_enabled = bool(hybrid_conf.get("fallback_enabled", True))
 
+        # G1/G2 覆盖配置（新增）
+        g1_g2_conf = peak_conf.get("g1_g2_override", {})
+        g1_g2_override_enabled = bool(g1_g2_conf.get("enabled", True))
+        g1_threshold = float(g1_g2_conf.get("g1_threshold", 98.0))
+        g2_threshold = float(g1_g2_conf.get("g2_threshold", 20.0))
+        use_peak_max_g1_g2 = bool(g1_g2_conf.get("use_peak_max", True))
+
+        print(f"[G1/G2覆盖] 配置: enabled={g1_g2_override_enabled}, "
+              f"G1>{g1_threshold}%, G2>{g2_threshold}%, "
+              f"use_peak_max={use_peak_max_g1_g2}")
+
         logger = setup_peak_logger()
         # Store only the latest 100 gray values for waveform / peak detection
         gray_buffer: Deque[float] = deque(maxlen=100)
@@ -1252,6 +1398,9 @@ def run_daemon() -> None:
 
         # ROI3 independent buffer (same structure as ROI2)
         roi3_gray_buffer: Deque[float] = deque(maxlen=100)
+        roi3_80_160_buffer: Deque[float] = deque(maxlen=100)
+        roi3_g1_buffer: Deque[float] = deque(maxlen=100)  # G1值缓冲区
+        roi3_g2_buffer: Deque[float] = deque(maxlen=100)  # G2值缓冲区
 
         # Initialize ROI1 threshold used so hybrid detection can reference it
         # before the per-frame ROI1 adaptive-threshold block runs.
@@ -1441,6 +1590,10 @@ def run_daemon() -> None:
                                 # 重置全局状态变量（防止数据污染）
                                 gray_buffer.clear()
                                 roi1_gray_buffer.clear()
+                                roi3_gray_buffer.clear()
+                                roi3_80_160_buffer.clear()
+                                roi3_g1_buffer.clear()  # 清空G1缓冲区
+                                roi3_g2_buffer.clear()  # 清空G2缓冲区
                                 reset_values = reset_video_state_variables(gray_buffer)
                                 (bg_count, bg_mean, last_intersection_roi, frames_since_protection_end,
                                  threshold_protection_active, protection_end_time, consecutive_below_threshold,
@@ -1566,6 +1719,10 @@ def run_daemon() -> None:
                 roi1_image = screen.crop((x1, y1, x2, y2))
                 roi1_width, roi1_height = roi1_image.size
 
+                # Initialize ROI3 statistics variables
+                roi3_g1: Optional[float] = None
+                roi3_g2: Optional[float] = None
+
                 # 3. Detect green line intersection in ROI1
                 roi_cv_image = cv2.cvtColor(
                     np.array(roi1_image),
@@ -1630,6 +1787,20 @@ def run_daemon() -> None:
                             roi3_gray = compute_average_gray(roi3_image)
                             roi3_gray_buffer.append(roi3_gray)
                             print(f"[DEBUG] ROI3 captured: frame={frame_index}, gray={roi3_gray:.2f}, buffer_len={len(roi3_gray_buffer)}")
+                            print(f"[DEBUG] ROI3 coords: ({r3x1}, {r3y1}, {r3x2}, {r3y2}), size={r3x2-r3x1}x{r3y2-r3y1}, center=({center_x}, {center_y})")
+
+                            # Compute normalized pixel count for range [80, 160]
+                            roi3_80_160_normalized = compute_roi3_80_160_normalized(roi3_image)
+                            roi3_80_160_buffer.append(roi3_80_160_normalized)
+                            print(f"[DEBUG] ROI3(80-160)%: frame={frame_index}, percentage={roi3_80_160_normalized:.2f}%, buffer_len={len(roi3_80_160_buffer)}")
+
+                            # Compute G1 and G2 ranges
+                            g1, g2 = compute_roi3_g1_g2_ranges(roi3_image)
+                            roi3_g1 = g1  # Save for cache recording
+                            roi3_g2 = g2  # Save for cache recording
+                            roi3_g1_buffer.append(g1)  # 存入G1缓冲区
+                            roi3_g2_buffer.append(g2)  # 存入G2缓冲区
+                            print(f"[STAT] G1(80-255)={g1:.2f}%, G2(150-255)={g2:.2f}%")
                         else:
                             print(f"[DEBUG] ROI3 extraction failed: frame={frame_index}, intersection={intersection}, roi3_extension_params={roi3_extension_params}")
                     else:
@@ -1731,6 +1902,13 @@ def run_daemon() -> None:
                             'skip_when_roi2_invalid': bool(data_quality_conf.get("skip_peaks_when_roi2_invalid", True)),
                             'roi2_min_gray': float(data_quality_conf.get("roi2_min_gray", 5.0)),
                             'roi2_max_gray': float(data_quality_conf.get("roi2_max_gray", 250.0)),
+                            # 新增G1/G2配置
+                            'g1_g2_override': {
+                                'enabled': g1_g2_override_enabled,
+                                'g1_threshold': g1_threshold,
+                                'g2_threshold': g2_threshold,
+                                'use_peak_max': use_peak_max_g1_g2,
+                            }
                         }
 
                         print(f"[混合检测] 开始分析 - ROI1曲线长度:{len(roi1_curve)}, ROI2曲线长度:{len(roi2_curve)}")
@@ -1739,6 +1917,10 @@ def run_daemon() -> None:
                         try:
                             hybrid_config_with_frame = {**hybrid_config, 'frame_index': frame_index}
                             hybrid_config_with_frame["buffer_start_frame_index"] = frame_index - len(roi1_curve) + 1
+                            # 新增：传递G1/G2曲线
+                            hybrid_config_with_frame["roi3_g1_curve"] = list(roi3_g1_buffer) if roi3_g1_buffer else []
+                            hybrid_config_with_frame["roi3_g2_curve"] = list(roi3_g2_buffer) if roi3_g2_buffer else []
+
                             hybrid_peaks = hybrid_peak_detection(
                                 roi1_curve, roi2_curve, hybrid_config_with_frame,
                                 processed_roi1_peaks, roi1_peak_counter
@@ -1928,10 +2110,8 @@ def run_daemon() -> None:
                             hybrid_peaks=hybrid_peaks,
                             roi1_curve=roi1_curve_for_stats,
                             roi1_threshold_used=roi1_threshold_used,
-                            # ROI3 override参数
-                            roi3_curve=list(roi3_gray_buffer) if roi3_gray_buffer else [],
-                            roi3_override_enabled=roi3_override_enabled,
-                            roi3_override_threshold=roi3_override_threshold
+                            # ROI3数据（用于统计）
+                            roi3_curve=list(roi3_gray_buffer) if roi3_gray_buffer else []
                         )
 
                 except Exception as e:
@@ -1974,6 +2154,11 @@ def run_daemon() -> None:
                             "intersection": {"current": intersection, "used": last_intersection_roi},
                             "roi2_region": roi2_region,
                             "roi2_gray": roi2_gray,
+                            "roi3": {
+                                "g1": float(roi3_g1) if roi3_g1 is not None else None,
+                                "g2": float(roi3_g2) if roi3_g2 is not None else None,
+                                "gray": float(roi3_gray) if roi3_gray is not None else None,
+                            },
                             "buffer": {
                                 "len": int(buffer_len),
                                 "start_frame_index": int(buffer_start_frame),
@@ -2223,6 +2408,11 @@ def run_daemon() -> None:
                             linewidth=1.5,
                             label=f"threshold ({roi1_threshold_used:.1f}{'[PROTECTED]' if roi1_threshold_protection_active else ''})",
                         )
+
+                        # Add ROI3 (80-160) percentage red curve if buffer has data
+                        if roi3_80_160_buffer:
+                            x3_80_160 = list(range(len(roi3_80_160_buffer)))
+                            ax.plot(x3_80_160, list(roi3_80_160_buffer), color="red", linewidth=1, label="ROI3(80-160)%")
 
                         # Highlight ROI1 peaks regions (placeholder for future peak detection)
                         for start, end in roi1_green_peaks:

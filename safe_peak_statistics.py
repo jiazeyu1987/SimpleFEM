@@ -172,9 +172,7 @@ class SafePeakStatistics:
                              hybrid_peaks: List[Dict] = None,
                              roi1_curve: List[float] = None,
                              roi1_threshold_used: float = 0.0,
-                             roi3_curve: Optional[List[float]] = None,
-                             roi3_override_enabled: bool = False,
-                             roi3_override_threshold: float = 115.0) -> List[Dict[str, Any]]:
+                             roi3_curve: Optional[List[float]] = None) -> List[Dict[str, Any]]:
         """
         从守护进程添加波峰数据，支持混合检测模式
 
@@ -228,7 +226,7 @@ class SafePeakStatistics:
                             frame_index, curve, roi1_curve, intersection, roi2_info,
                             gray_value, difference_threshold, pre_post_avg_frames,
                             threshold_used, roi1_threshold_used, bg_mean,
-                            roi3_curve, roi3_override_enabled, roi3_override_threshold
+                            roi3_curve
                         )
 
                         # 应用原有的三层去重逻辑
@@ -267,7 +265,7 @@ class SafePeakStatistics:
                         curve, intersection, roi2_info, gray_value,
                         difference_threshold, pre_post_avg_frames,
                         threshold_used, bg_mean,
-                        roi3_curve, roi3_override_enabled, roi3_override_threshold
+                        roi3_curve
                     )
 
                     # 第一层去重：基于前后帧平均值
@@ -298,7 +296,7 @@ class SafePeakStatistics:
                         curve, intersection, roi2_info, gray_value,
                         difference_threshold, pre_post_avg_frames,
                         threshold_used, bg_mean,
-                        roi3_curve, roi3_override_enabled, roi3_override_threshold
+                        roi3_curve
                     )
 
                     # 第一层去重：基于前后帧平均值
@@ -345,9 +343,7 @@ class SafePeakStatistics:
                          pre_post_avg_frames: int = 5,
                          threshold_used: Optional[float] = None,
                          bg_mean: Optional[float] = None,
-                         roi3_curve: Optional[List[float]] = None,
-                         roi3_override_enabled: bool = False,
-                         roi3_override_threshold: float = 115.0) -> Dict[str, Any]:
+                         roi3_curve: Optional[List[float]] = None) -> Dict[str, Any]:
         """创建简化的波峰数据结构（只保留必要字段）"""
 
         # 计算curve起始帧对应的全局帧索引
@@ -385,13 +381,11 @@ class SafePeakStatistics:
         frame_diff = post_avg - pre_avg
         peak_max_value, peak_max_frame = self._get_peak_max_value(curve, start_frame, end_frame)
 
-        # ROI3 peak max calculation and override logic
+        # ROI3 peak max calculation (for statistics only)
         roi3_peak_max_value = 0.0
         roi3_peak_max_frame = -1
-        roi3_override_applied = False
-        final_peak_type = peak_type
 
-        if roi3_curve and roi3_override_enabled:
+        if roi3_curve:
             roi3_peak_max_value, roi3_max_curve_idx = self._get_peak_max_value(roi3_curve, start_frame, end_frame)
 
             # 将curve中的索引转换为全局总帧数
@@ -399,13 +393,8 @@ class SafePeakStatistics:
             # curve[0]对应的全局帧 = frame_index - len(curve) + 1
             roi3_peak_max_frame = curve_start_global_frame + roi3_max_curve_idx if roi3_max_curve_idx >= 0 else -1
 
-            # Apply ROI3 override logic: RED -> GREEN if ROI3 peak max > threshold
-            if peak_type == "red" and roi3_peak_max_value > roi3_override_threshold:
-                final_peak_type = "green"
-                roi3_override_applied = True
-
         return {
-            'peak_type': final_peak_type,  # May be changed by ROI3 override
+            'peak_type': peak_type,  # ROI2判定的颜色，不再经过ROI3 override修改
             'frame_index': frame_index,
             'pre_peak_avg': round(pre_avg, 2),
             'post_peak_avg': round(post_avg, 2),
@@ -419,9 +408,7 @@ class SafePeakStatistics:
             'pre_peak_frame_start': pre_peak_frame_start,  # 前置平均值计算的起始帧（全局）
             'pre_peak_frame_end': pre_peak_frame_end,    # 前置平均值计算的结束帧（全局）
             'post_peak_frame_start': post_peak_frame_start,  # 后置平均值计算的起始帧（全局）
-            'post_peak_frame_end': post_peak_frame_end,    # 后置平均值计算的结束帧（全局）
-            'roi3_override_applied': roi3_override_applied,
-            'roi3_override_threshold': round(float(roi3_override_threshold), 3)
+            'post_peak_frame_end': post_peak_frame_end     # 后置平均值计算的结束帧（全局）
         }
 
     def _create_hybrid_peak_data(self,
@@ -440,9 +427,7 @@ class SafePeakStatistics:
                                 roi2_threshold_used: Optional[float] = None,
                                 roi1_threshold_used: float = 0.0,
                                 bg_mean: Optional[float] = None,
-                                roi3_curve: Optional[List[float]] = None,
-                                roi3_override_enabled: bool = False,
-                                roi3_override_threshold: float = 115.0) -> Dict[str, Any]:
+                                roi3_curve: Optional[List[float]] = None) -> Dict[str, Any]:
         """
         创建混合检测波峰数据记录，包含ROI1和ROI2的完整信息
 
@@ -513,13 +498,11 @@ class SafePeakStatistics:
         if roi1_curve:
             roi1_peak_max, _ = self._get_peak_max_value(roi1_curve, start_frame, end_frame)
 
-        # 计算ROI3在波峰区间的最大值并应用覆盖逻辑
+        # 计算ROI3在波峰区间的最大值（仅用于统计）
         roi3_peak_max = 0.0
         roi3_peak_max_frame = -1
-        roi3_override_applied = False
-        final_peak_type = color
 
-        if roi3_curve and roi3_override_enabled:
+        if roi3_curve:
             roi3_peak_max, roi3_max_curve_idx = self._get_peak_max_value(roi3_curve, start_frame, end_frame)
 
             # 将curve中的索引转换为全局总帧数
@@ -528,16 +511,15 @@ class SafePeakStatistics:
             # 注意：这里使用roi2_curve的长度作为参考（所有缓冲区大小一致）
             roi3_peak_max_frame = curve_start_global_frame + roi3_max_curve_idx if roi3_max_curve_idx >= 0 else -1
 
-            # 应用ROI3覆盖逻辑: RED -> GREEN 如果ROI3峰值 > 阈值
-            if final_peak_type == "red" and roi3_peak_max > roi3_override_threshold:
-                final_peak_type = "green"
-                roi3_override_applied = True
-                print(f"[DEBUG] ROI3 override applied: frame={frame_index}, red->green, roi3_max={roi3_peak_max:.2f}, roi3_global_frame={roi3_peak_max_frame}")
+        # 从hybrid_peak中提取G1/G2信息（新增）
+        g1_value = hybrid_peak.get('g1_value', None)
+        g2_value = hybrid_peak.get('g2_value', None)
+        g1_g2_override_applied = hybrid_peak.get('g1_g2_override_applied', False)
 
         # 创建混合检测特有数据结构
         hybrid_data = {
-            # 基础字段（兼容传统检测）
-            'peak_type': final_peak_type,
+            # 基础字段
+            'peak_type': color,  # ROI1检测的颜色，不再经过ROI3 override修改
             'frame_index': frame_index,
             'pre_peak_avg': round(pre_avg, 2),
             'post_peak_avg': round(post_avg, 2),
@@ -577,6 +559,11 @@ class SafePeakStatistics:
             'roi2_pre_avg': round(hybrid_peak.get('pre_avg', pre_avg), 2),
             'roi2_post_avg': round(hybrid_peak.get('post_avg', post_avg), 2),
             'roi2_peak_max': round(roi2_peak_max, 2),
+
+            # 新增G1/G2字段
+            'g1_value': round(float(g1_value), 2) if g1_value is not None else '',
+            'g2_value': round(float(g2_value), 2) if g2_value is not None else '',
+            'g1_g2_override_applied': bool(g1_g2_override_applied),
 
             # 兼容字段
             'intersection': intersection,
@@ -865,10 +852,14 @@ class SafePeakStatistics:
                 'pre_peak_frame_end',
                 'post_peak_frame_start',
                 'post_peak_frame_end',
+                # 新增G1/G2字段
+                'g1_value',
+                'g2_value',
+                'g1_g2_override_applied',
             ]
 
-            # 过滤数据，只包含CSV需要的字段
-            csv_data = {key: peak_data[key] for key in fieldnames if key in peak_data}
+            # 过滤数据，只包含CSV需要的字段（使用.get()兼容旧数据）
+            csv_data = {key: peak_data.get(key, '') for key in fieldnames}
 
             # 原子性写入：先写临时文件，再重命名
             temp_file = self.csv_path + '.tmp'

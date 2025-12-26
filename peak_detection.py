@@ -93,6 +93,54 @@ def classify_peak_color(
     return "green" if frameDifference >= differenceThreshold else "red"
 
 
+def classify_peak_color_with_g1_g2_override(
+    frameDifference: float,
+    differenceThreshold: float = 1.5,
+    roi3_g1: Optional[float] = None,
+    roi3_g2: Optional[float] = None,
+    g1_threshold: float = 98.0,
+    g2_threshold: float = 20.0,
+    g1_g2_override_enabled: bool = True,
+) -> Tuple[str, bool]:
+    """
+    Enhanced peak classification with G1/G2 override logic.
+
+    G1: Percentage of pixels in grayscale range [80, 255]
+    G2: Percentage of pixels in grayscale range [150, 255]
+
+    Override rule:
+    - Only applies to RED classifications
+    - If G1 > g1_threshold AND G2 > g2_threshold → force to GREEN
+
+    Args:
+        frameDifference: Frame difference (post_avg - pre_avg)
+        differenceThreshold: Base classification threshold
+        roi3_g1: G1 value for the peak frame (percentage 0-100)
+        roi3_g2: G2 value for the peak frame (percentage 0-100)
+        g1_threshold: Minimum G1 percentage for override (default 98.0)
+        g2_threshold: Minimum G2 percentage for override (default 20.0)
+        g1_g2_override_enabled: Whether G1/G2 override is enabled
+
+    Returns:
+        Tuple[str, bool]: (final_color, override_applied)
+        - final_color: "green" or "red"
+        - override_applied: True if G1/G2 override was applied
+    """
+    # Initial classification using base logic
+    base_color = classify_peak_color(frameDifference, differenceThreshold)
+
+    # G1/G2 override only applies to RED classifications
+    if (g1_g2_override_enabled and
+        base_color == "red" and
+        roi3_g1 is not None and
+        roi3_g2 is not None and
+        roi3_g1 > g1_threshold and
+        roi3_g2 > g2_threshold):
+        return "green", True  # G1/G2 override applied
+
+    return base_color, False  # No override
+
+
 def classify_peak_color_with_roi3_override(
     frameDifference: float,
     differenceThreshold: float = 1.5,
@@ -101,10 +149,18 @@ def classify_peak_color_with_roi3_override(
     roi3_override_enabled: bool = True,
 ) -> str:
     """
-    Enhanced peak classification with ROI3 override logic.
+    [DEPRECATED] Use classify_peak_color_with_g1_g2_override() instead.
 
-    Returns: "green" or "red" after ROI3 override consideration
+    Legacy ROI3 override logic - kept for backward compatibility only.
     """
+    import warnings
+    warnings.warn(
+        "classify_peak_color_with_roi3_override is deprecated, "
+        "use classify_peak_color_with_g1_g2_override instead",
+        DeprecationWarning,
+        stacklevel=2
+    )
+
     # Initial classification using existing logic
     base_color = classify_peak_color(frameDifference, differenceThreshold)
 

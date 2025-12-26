@@ -68,6 +68,11 @@ class SimpleFEMConfigGUI:
         self.total_pixels_var = tk.StringVar(value="0")
         self.largest_component_pixels_var = tk.StringVar(value="0")
         self.component_count_var = tk.StringVar(value="0")
+        self.threshold_percentage_var = tk.StringVar(value="0.00%")
+
+        # 上一帧平均灰度值（用于计算差值）
+        self.prev_frame_avg_gray = None
+        self.frame_diff_var = tk.StringVar(value="--")
 
         # Continuous check functionality
         self.continuous_check_enabled = tk.BooleanVar(value=False)
@@ -373,6 +378,14 @@ class SimpleFEMConfigGUI:
         total_pixels_label = ttk.Label(stats_frame, textvariable=self.total_pixels_var, font=('Courier', 9), relief='sunken', padding=(3, 1))
         total_pixels_label.pack(side=tk.LEFT, padx=(0, 10))
 
+        ttk.Label(stats_frame, text="阈值范围占比:").pack(side=tk.LEFT, padx=(0, 5))
+        percentage_label = ttk.Label(stats_frame, textvariable=self.threshold_percentage_var, font=('Courier', 9), relief='sunken', padding=(3, 1))
+        percentage_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(stats_frame, text="帧差值:").pack(side=tk.LEFT, padx=(0, 5))
+        frame_diff_label = ttk.Label(stats_frame, textvariable=self.frame_diff_var, font=('Courier', 9), relief='sunken', padding=(3, 1))
+        frame_diff_label.pack(side=tk.LEFT, padx=(0, 10))
+
         ttk.Label(stats_frame, text="最大连通域像素:").pack(side=tk.LEFT, padx=(0, 5))
         largest_pixels_label = ttk.Label(stats_frame, textvariable=self.largest_component_pixels_var, font=('Courier', 9), relief='sunken', padding=(3, 1))
         largest_pixels_label.pack(side=tk.LEFT, padx=(0, 10))
@@ -399,30 +412,30 @@ class SimpleFEMConfigGUI:
         self.alpha_value_label = ttk.Label(overlay_frame, text="0.5", font=('Courier', 9))
         self.alpha_value_label.pack(side=tk.LEFT)
 
-        # 热力图控制区域 (在叠加控制区域下方)
-        heatmap_frame = ttk.Frame(threshold_test_frame)
-        heatmap_frame.pack(fill=tk.X, pady=(5, 0))
-
-        ttk.Label(heatmap_frame, text="热力图控制:", font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
-        self.heatmap_button = ttk.Button(heatmap_frame, text="热力图显示", command=self.on_heatmap_submit)
-        self.heatmap_button.pack(side=tk.LEFT, padx=2)
-        self.heatmap_clear_button = ttk.Button(heatmap_frame, text="清除热力图", command=self.on_heatmap_clear)
-        self.heatmap_clear_button.pack(side=tk.LEFT, padx=2)
-
-        self.continuous_heatmap_checkbox = ttk.Checkbutton(
-            heatmap_frame,
-            text="连续热力图 (加载图片时自动执行)",
-            variable=self.continuous_heatmap_enabled
-        )
-        self.continuous_heatmap_checkbox.pack(side=tk.LEFT, padx=(10, 5))
-
-        ttk.Label(heatmap_frame, text="热力图透明度:").pack(side=tk.LEFT, padx=(10, 5))
-        self.heatmap_alpha_scale = ttk.Scale(heatmap_frame, from_=0.0, to=1.0, variable=self.heatmap_alpha_var,
-                                            orient=tk.HORIZONTAL, length=100, command=self.on_heatmap_alpha_change)
-        self.heatmap_alpha_scale.pack(side=tk.LEFT, padx=(0, 5))
-
-        self.heatmap_alpha_value_label = ttk.Label(heatmap_frame, text="0.6", font=('Courier', 9))
-        self.heatmap_alpha_value_label.pack(side=tk.LEFT)
+        # 热力图控制区域 (在叠加控制区域下方) - 已隐藏
+        # heatmap_frame = ttk.Frame(threshold_test_frame)
+        # heatmap_frame.pack(fill=tk.X, pady=(5, 0))
+        #
+        # ttk.Label(heatmap_frame, text="热力图控制:", font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+        # self.heatmap_button = ttk.Button(heatmap_frame, text="热力图显示", command=self.on_heatmap_submit)
+        # self.heatmap_button.pack(side=tk.LEFT, padx=2)
+        # self.heatmap_clear_button = ttk.Button(heatmap_frame, text="清除热力图", command=self.on_heatmap_clear)
+        # self.heatmap_clear_button.pack(side=tk.LEFT, padx=2)
+        #
+        # self.continuous_heatmap_checkbox = ttk.Checkbutton(
+        #     heatmap_frame,
+        #     text="连续热力图 (加载图片时自动执行)",
+        #     variable=self.continuous_heatmap_enabled
+        # )
+        # self.continuous_heatmap_checkbox.pack(side=tk.LEFT, padx=(10, 5))
+        #
+        # ttk.Label(heatmap_frame, text="热力图透明度:").pack(side=tk.LEFT, padx=(10, 5))
+        # self.heatmap_alpha_scale = ttk.Scale(heatmap_frame, from_=0.0, to=1.0, variable=self.heatmap_alpha_var,
+        #                                     orient=tk.HORIZONTAL, length=100, command=self.on_heatmap_alpha_change)
+        # self.heatmap_alpha_scale.pack(side=tk.LEFT, padx=(0, 5))
+        #
+        # self.heatmap_alpha_value_label = ttk.Label(heatmap_frame, text="0.6", font=('Courier', 9))
+        # self.heatmap_alpha_value_label.pack(side=tk.LEFT)
 
         # 其他配置
         ttk.Label(config_upper_frame, text="其他配置", font=('Arial', 12, 'bold')).grid(row=row, column=0, columnspan=2, pady=(10, 5))
@@ -1026,6 +1039,10 @@ class SimpleFEMConfigGUI:
                 self.roi1_image = Image.open(filename)
                 self.current_roi1_path = filename
                 self.image_path_var.set(f"已加载: {os.path.basename(filename)}")
+
+                # 重置帧差值状态（新图片序列）
+                self.prev_frame_avg_gray = None
+                self.frame_diff_var.set("--")
 
                 # 检测图片序列
                 print(f"[DEBUG] 开始检测图片序列: {filename}")
@@ -2106,6 +2123,39 @@ class SimpleFEMConfigGUI:
             # 计算并显示统计信息
             self.calculate_mask_statistics()
 
+            # 计算阈值范围内像素百分比
+            try:
+                import numpy as np
+                # 转换为灰度图（避免RGB三通道导致重复计算）
+                roi3_gray = roi3_image.convert('L')
+                roi3_array = np.array(roi3_gray)
+                total_roi3_pixels = roi3_array.shape[0] * roi3_array.shape[1]
+                in_range_pixels = np.sum((roi3_array >= lower) & (roi3_array <= upper))
+                percentage = (in_range_pixels / total_roi3_pixels * 100) if total_roi3_pixels > 0 else 0.0
+                self.threshold_percentage_var.set(f"{percentage:.2f}%")
+                print(f"[DEBUG] ROI3统计: 总像素={total_roi3_pixels}, 范围[{lower}-{upper}]内像素={in_range_pixels}, 占比={percentage:.2f}%")
+
+                # 计算当前帧的平均灰度值
+                current_avg_gray = float(np.mean(roi3_array))
+
+                # 计算与上一帧的差值
+                if self.prev_frame_avg_gray is not None:
+                    frame_diff = current_avg_gray - self.prev_frame_avg_gray
+                    # 显示差值，保留2位小数，正数前面加+号
+                    diff_str = f"{frame_diff:+.2f}"
+                    self.frame_diff_var.set(diff_str)
+                    print(f"[DEBUG] 帧差值: 当前={current_avg_gray:.2f}, 上一帧={self.prev_frame_avg_gray:.2f}, 差值={diff_str}")
+                else:
+                    self.frame_diff_var.set("--")
+                    print(f"[DEBUG] 帧差值: 当前={current_avg_gray:.2f}, 上一帧=无")
+
+                # 保存当前帧的平均灰度值，供下次计算使用
+                self.prev_frame_avg_gray = current_avg_gray
+
+            except Exception as e:
+                print(f"[ERROR] 百分比计算失败: {e}")
+                self.threshold_percentage_var.set("0.00%")
+
             self.status_var.set(f"阈值提取完成: {lower}-{upper}")
 
         except Exception as e:
@@ -2122,8 +2172,11 @@ class SimpleFEMConfigGUI:
 
         # 重置统计信息
         self.total_pixels_var.set("0")
+        self.threshold_percentage_var.set("0.00%")
+        self.frame_diff_var.set("--")
         self.largest_component_pixels_var.set("0")
         self.component_count_var.set("0")
+        self.prev_frame_avg_gray = None  # 重置上一帧灰度值
 
         # 更新画布（不显示叠加）
         self.update_roi_visualization()
@@ -2336,8 +2389,11 @@ class SimpleFEMConfigGUI:
 
             # 清除统计信息
             self.total_pixels_var.set("0")
+            self.threshold_percentage_var.set("0.00%")
+            self.frame_diff_var.set("--")
             self.largest_pixels_var.set("0")
             self.component_count_var.set("0")
+            self.prev_frame_avg_gray = None  # 重置上一帧灰度值
 
             self.status_var.set("热力图已清除")
 

@@ -24,6 +24,9 @@ python simple_roi_daemon.py
 # Vein detection and following system
 python auto_vein_detector.py
 
+# Configuration GUI for visual ROI setup and parameter tuning
+python config_gui.py
+
 # Run the built standalone executable (after building)
 dist\SimpleFEM_ROI_Daemon.exe
 
@@ -43,8 +46,11 @@ pip install pyinstaller
 # Build Windows executable using the provided command
 pyinstaller --onefile --console --name SimpleFEM_ROI_Daemon --add-data "simple_fem_config.json;." simple_roi_daemon.py
 
-# View build command
+# View build command reference
 type 打包命令.txt
+
+# Install all dependencies from requirements.txt
+pip install -r requirements.txt
 ```
 
 ### Testing and Development
@@ -119,12 +125,13 @@ export NHEM_PROCESSING_MODE=video
 **SimpleFEM** implements a modular, medical-grade signal processing pipeline with dual operation modes:
 
 #### Main Processing Components
-1. **Main Daemon** (`simple_roi_daemon.py`) - Primary orchestrator with video/screen capture, batch video processing, and threshold protection
-2. **Green Line Detection** (`green_detector.py`) - OpenCV HSV filtering with Canny edge detection and Hough line transformation
-3. **Peak Detection** (`peak_detection.py`) - Signal processing with adaptive thresholding and green/red classification
-4. **Improved Peak Detection** (`improved_peak_detection.py`) - Enhanced algorithms with signal preprocessing and lifecycle tracking
-5. **Statistics Management** (`safe_peak_statistics.py`) - Three-layer deduplication with atomic CSV export and session tracking
-6. **Vein Detection** (`auto_vein_detector.py`) - Connected component analysis with automatic ROI tracking for vein following
+1. **Main Daemon** (`simple_roi_daemon.py`) - Primary orchestrator with video/screen capture, batch video processing, threshold protection, and analysis cache (JSONL)
+2. **Configuration GUI** (`config_gui.py`) - Visual interface for ROI setup, parameter tuning, and real-time preview with zoom/pan controls
+3. **Green Line Detection** (`green_detector.py`) - OpenCV HSV filtering with Canny edge detection, Hough line transformation, and EMA/velocity-based intersection filtering
+4. **Peak Detection** (`peak_detection.py`) - Signal processing with adaptive thresholding, green/red classification, and ROI3 override support
+5. **Improved Peak Detection** (`improved_peak_detection.py`) - Enhanced algorithms with signal preprocessing and lifecycle tracking
+6. **Statistics Management** (`safe_peak_statistics.py`) - Three-layer deduplication with atomic CSV export, batch mode session management, and ROI1 peak ID tracking
+7. **Vein Detection** (`auto_vein_detector.py`) - Connected component analysis with automatic ROI tracking for vein following
 
 #### System Architecture Patterns
 - **Modular Design**: Clear separation of concerns with plugin-like algorithm support
@@ -139,13 +146,13 @@ export NHEM_PROCESSING_MODE=video
 ```
 Input Source (Screen/Video) → ROI1 Processing → Green Line Detection (OpenCV)
                                                               ↓
-                                     Intersection Point Calculation → ROI2 Extraction
+                                     Intersection Point Calculation → ROI2/ROI3 Extraction
                                                               ↓
                                      Grayscale Value Computation → Circular Buffer (100 frames)
                                                               ↓
-                                     Adaptive Peak Detection → Green/Red Classification
+                                     Adaptive Peak Detection → Green/Red Classification (+ROI3 Override)
                                                               ↓
-                                     Three-Layer Deduplication → CSV Export + Logging
+                                     Three-Layer Deduplication → Analysis Cache (JSONL) + CSV Export + Logging
 ```
 
 #### Vein Detection Pipeline
@@ -165,10 +172,11 @@ Screen/Video Capture → ROI2 Extraction → Connected Component Analysis (0-10 
 
 ### Key Technologies
 
-- **Computer Vision**: OpenCV HSV filtering, Canny edge detection, Hough line transformation, connected component analysis
-- **Image Processing**: PIL/Pillow screen capture, numpy array operations, ROI coordinate transformation
-- **Signal Processing**: Adaptive thresholding, morphological operations, peak lifecycle tracking, frame difference analysis
-- **Data Management**: Thread-safe collections, atomic file operations, temporary file handling, session tracking
+- **Computer Vision**: OpenCV HSV filtering, Canny edge detection, Hough line transformation, connected component analysis, EMA filtering
+- **Image Processing**: PIL/Pillow screen capture, numpy array operations, ROI coordinate transformation, histogram-based averaging
+- **Signal Processing**: Adaptive thresholding with threshold protection, morphological operations, peak lifecycle tracking, frame difference analysis
+- **Data Management**: Thread-safe collections, atomic file operations, temporary file handling, session tracking, JSONL analysis cache
+- **Configuration Management**: JSON-based configuration with NHEM_* environment variable overrides, visual GUI editor
 - **Build System**: PyInstaller standalone executables with embedded configuration files
 
 ## Configuration System
@@ -182,8 +190,14 @@ SimpleFEM uses a hierarchical configuration approach with runtime override capab
   "data_processing": {
     "save_roi1": true,              // Save large ROI captures
     "save_roi2": true,              // Save small ROI extracts
+    "save_roi3": true,              // Save extended ROI3 for color validation
     "save_wave": true,              // Save waveform plots
-    "only_delect": true             // Only save frames with detected peaks
+    "save_roi1_wave": true,         // Save ROI1 waveform data
+    "only_delect": false            // Only save frames with detected peaks
+  },
+  "analysis_cache": {
+    "enabled": true,                // Save per-frame analysis cache (JSONL) for debugging
+    "flush_every": 50               // Flush cache every N frames
   },
   "video_processing": {
     "video_path": "video.mp4",      // Video file path or array for batch processing
@@ -316,16 +330,20 @@ new_roi2_coords = reposition_roi_around_center(mask_center, roi2_dimensions)
 
 ### 5. Three-Layer Deduplication System
 1. **Recent Peak Comparison**: 5-frame window prevents immediate duplicates
-2. **Consecutive Frame Deduplication**: Same-color peak filtering with configurable windows
-3. **Invalid Data Filtering**: Zero average values and malformed peak rejection
-- **Color Priority**: Green peaks take precedence over red in conflicts
+2. **Consecutive Frame Deduplication**: Same-color peak filtering with configurable windows (default: 40 frames)
+3. **Cross-Color Deduplication**: Different-color peaks at same frame keep higher priority (green > red)
+4. **Invalid Data Filtering**: Zero average values and malformed peak rejection
+- **Color Priority**: Green peaks (priority 2) take precedence over red (priority 1) in conflicts
+- **ROI1 Peak ID Tracking**: Unique IDs prevent duplicate processing in hybrid detection mode
 - **Atomic CSV Export**: Thread-safe writing with temporary files
 
 ### 6. Data Export and Session Management
-- **CSV Format**: Comprehensive metadata (timestamp, frame indices, coordinates, ROI info)
-- **Session Tracking**: Unique IDs for data provenance and analysis
-- **File Organization**: Structured output directories (`/exports/`, `/tmp/`, `/logs/`)
+- **Analysis Cache (JSONL)**: Per-frame analysis data in `export/roi_analysis_cache_*.jsonl` for debugging
+- **CSV Format**: Comprehensive metadata (timestamp, frame indices, coordinates, ROI info, peak IDs)
+- **Session Tracking**: Unique IDs with video name for batch processing mode
+- **File Organization**: Structured output directories (`/exports/`, `/roi1/`, `/roi2/`, `/roi3/`, `/wave/`, `/logs/`)
 - **Waveform Visualization**: Matplotlib plots with peak annotations and classification
+- **Batch Mode Support**: Each video generates separate CSV with sanitized filename and timestamp
 
 ## Performance and Reliability
 
@@ -358,12 +376,14 @@ new_roi2_coords = reposition_roi_around_center(mask_center, roi2_dimensions)
   - `opencv-python` - Computer vision and image processing
   - `Pillow` - Screen capture and image manipulation
   - `matplotlib` - Waveform visualization and plotting
+  - `tkinter` - GUI for configuration management (built into Python)
 
 ### Modular Code Structure
 ```
 SimpleFEM/
 ├── Core Processing Modules/
-│   ├── simple_roi_daemon.py      # Main orchestrator with dual input modes
+│   ├── simple_roi_daemon.py      # Main orchestrator with dual input modes, analysis cache
+│   ├── config_gui.py             # Visual configuration editor with ROI preview
 │   ├── green_detector.py         # OpenCV HSV filtering and intersection detection
 │   ├── peak_detection.py         # Adaptive thresholding and classification
 │   ├── improved_peak_detection.py # Enhanced algorithms with lifecycle tracking
@@ -378,16 +398,20 @@ SimpleFEM/
 │   ├── Algorithm Testing/
 │   │   ├── improved_peak_detection.py  # Enhanced peak detection algorithms
 │   │   ├── test_anti_jitter.py         # Anti-jitter mechanism testing
-│   │   └── test_roi1_*.py             # ROI1 implementation variants
+│   │   ├── test_roi1_*.py             # ROI1 implementation variants
+│   │   └── test_roi3_*.py             # ROI3 override testing
 │   ├── Debug and Diagnosis/
 │   │   ├── diagnose_basic.py           # Basic system diagnostics
 │   │   ├── debug_wave1.py              # Waveform debugging
 │   │   └── analyze_roi2_jitter.py      # ROI2 jitter analysis
+│   │   ├── trace_data_flow.py          # Data flow tracing
+│   │   └── final_diagnosis.py          # Comprehensive diagnosis
 │   └── Validation/
 │       ├── verify_*.py                 # Implementation verification scripts
 │       └── manual_test_anti_jitter.py  # Manual anti-jitter testing
 ├── Build System/
 │   ├── 打包命令.txt               # PyInstaller build command
+│   ├── requirements.txt           # Python dependencies
 │   └── dist/                     # Standalone executable output
 └── Documentation/
     ├── CLAUDE.md                 # Claude Code development guidance
@@ -437,11 +461,14 @@ While SimpleFEM operates independently, it integrates with the broader NHEM syst
 - **Build System**: PyInstaller creates standalone executables with embedded configuration
 
 ### Recent System Improvements
-- **Anti-Jitter Mechanisms**: Multiple filtering algorithms for stable ROI tracking
+- **Anti-Jitter Mechanisms**: Multiple filtering algorithms (EMA, velocity, threshold-based) for stable ROI tracking
 - **Enhanced Peak Detection**: Improved algorithms with lifecycle tracking and morphological operations
 - **Multi-Video Support**: Batch processing with automatic video switching and session management
-- **Threshold Protection**: Prevents peak contamination of background calculations
-- **Hybrid Detection**: Separate ROI1 (peak detection) and ROI2 (color classification) pipelines
+- **Threshold Protection**: Prevents peak contamination of background calculations with configurable recovery delays
+- **Hybrid Detection**: Separate ROI1 (peak detection) and ROI2 (color classification) pipelines with fusion strategies
+- **ROI3 Override Support**: Extended vertical region for additional color classification validation
+- **Analysis Cache**: Per-frame JSONL logging for debugging and analysis reproducibility
+- **Configuration GUI**: Visual interface for ROI setup with real-time preview, zoom, and pan controls
 - **Velocity Filtering**: Rejects rapid intersection movements that indicate detection instability
 - **Consistency Validation**: Cross-validation between different detection methods
 
@@ -458,23 +485,29 @@ While SimpleFEM operates independently, it integrates with the broader NHEM syst
 When peak detection is not working as expected:
 1. **Check Threshold Values**: The `threshold` in config may be too high/low for your video content
 2. **Enable ROI1 Waveform Saving**: Set `save_roi1_wave: true` to visualize ROI1 waveform data
-3. **Verify Green Line Detection**: Check if ROI1 coordinates align with actual green line position
-4. **Review Adaptive Threshold**: If enabled, check `adaptive_window_seconds` and `threshold_over_mean_ratio`
-5. **Use Diagnostic Scripts**: Run `diagnose_basic.py` to verify basic signal processing pipeline
+3. **Enable Analysis Cache**: Set `analysis_cache.enabled: true` to generate JSONL files for detailed frame-by-frame analysis
+4. **Verify Green Line Detection**: Check if ROI1 coordinates align with actual green line position
+5. **Review Adaptive Threshold**: If enabled, check `adaptive_window_seconds` and `threshold_over_mean_ratio`
+6. **Check Threshold Protection**: Ensure `threshold_protection.enabled` is not preventing background updates
+7. **Use Diagnostic Scripts**: Run `diagnose_basic.py`, `trace_data_flow.py`, or `final_diagnosis.py` for debugging
 
 ### ROI2 Jitter Issues
 If ROI2 region is unstable or jumping:
 1. **Enable Anti-Jitter**: Set `roi2_anti_jitter.enabled: true` in config
-2. **Adjust Movement Threshold**: Increase `roi2_anti_jitter.movement_threshold` for more aggressive filtering
-3. **Check EMA Settings**: For algorithm='ema', tune `alpha` (lower = more smoothing)
-4. **Verify Green Line Detection**: Instability often originates from upstream green line detection
+2. **Choose Algorithm**: Set `roi2_anti_jitter.algorithm` to 'threshold' (no small movements) or 'ema' (smooth filtering)
+3. **Adjust Movement Threshold**: For 'threshold' algorithm, increase `movement_threshold` (default: 20.0 pixels)
+4. **Tune EMA Settings**: For 'ema' algorithm, adjust `alpha` (default: 0.25, lower = more smoothing)
+5. **Verify Green Line Detection**: Instability often originates from upstream green line detection
+6. **Check Velocity Filtering**: Review `green_detector.py` for velocity-based filtering parameters
 
 ### CSV Export Issues
 When CSV exports are missing or incomplete:
-1. **Check Deduplication**: Peaks may be filtered by `consecutive_frame_window` or `cross_color_deduplication_enabled`
+1. **Check Deduplication**: Peaks may be filtered by `consecutive_frame_window` (default: 40) or `cross_color_deduplication_enabled`
 2. **Verify Only-Detect Mode**: If `only_delect: true`, only frames with peaks generate output files
 3. **Review Color Priority**: Green peaks (priority 2) override red peaks (priority 1) in deduplication
 4. **Check Export Directory**: CSV files are written to `export/` folder with `peak_statistics_*.csv` naming
+5. **Analysis Cache**: Check `roi_analysis_cache_*.jsonl` files for complete frame-by-frame data
+6. **Batch Mode**: Each video generates a separate CSV with video name prefix in batch processing
 
 ### Video Processing Problems
 For video playback or processing issues:
@@ -492,6 +525,20 @@ To process multiple videos sequentially:
 
 ## Configuration Quick Reference
 
+### Using the Configuration GUI
+The visual configuration editor (`config_gui.py`) provides:
+- **ROI Visual Setup**: Load ROI1/ROI2/ROI3 images and visualize current configuration
+- **Real-time Preview**: See ROI regions overlaid on actual captured images
+- **Zoom and Pan**: Mouse wheel to zoom (Y-axis for waveform), click-drag to pan
+- **Image Navigation**: Browse through sequence of ROI1 captures
+- **Parameter Tuning**: Adjust all configuration parameters with immediate visual feedback
+- **Save/Reload**: Save changes to JSON and reload configuration
+
+**Best Practices**:
+- Run `config_gui.py` after initial screen capture to visually verify ROI alignment
+- Use zoom/pan to inspect fine details of green line intersection areas
+- Navigate through multiple ROI1 images to ensure configuration works across different frames
+
 ### Key Parameters for Tuning
 | Parameter | Location | Purpose | Typical Range |
 |-----------|----------|---------|---------------|
@@ -500,6 +547,9 @@ To process multiple videos sequentially:
 | `frame_rate` | `roi_capture.frame_rate` | Capture/processing speed | 5-30 FPS |
 | `consecutive_frame_window` | `deduplication.consecutive_frame_window` | Peak deduplication | 10-50 frames |
 | `movement_threshold` | `roi2_anti_jitter.movement_threshold` | ROI2 stability | 10-30 pixels |
+| `roi2_anti_jitter.algorithm` | `roi2_anti_jitter.algorithm` | Anti-jitter method | 'threshold' or 'ema' |
+| `analysis_cache.enabled` | `analysis_cache.enabled` | Debug logging | true/false |
+| `hybrid_detection.enabled` | `hybrid_detection.enabled` | Hybrid mode | true/false |
 
 ### Mode Switching
 Change `processing_mode` in `simple_fem_config.json`:
@@ -510,5 +560,53 @@ Change `processing_mode` in `simple_fem_config.json`:
 ### Important Constraints
 - **ROI1 must contain visible green line** for intersection detection to work
 - **ROI2 coordinates are relative to ROI1**, not absolute screen coordinates
+- **ROI3 coordinates are relative to ROI1**, extended vertically for color validation
 - **Circular buffer size is fixed at 100 frames** - affects memory and detection window
 - **Environment variables use NHEM_ prefix** and override JSON config values
+- **Analysis Cache files can grow large** - disable in production if not needed for debugging
+- **Video path as directory processes all videos** - for batch processing, ensure directory contains only target videos
+- **PyInstaller bundles configuration** - modify `simple_fem_config.json` before building executable
+
+## Data Formats and File Organization
+
+### Output Directory Structure
+```
+SimpleFEM/
+├── export/                        # All exported data and analysis results
+│   ├── peak_statistics_{session_id}.csv        # Peak detection results
+│   ├── roi_analysis_cache_{session_id}_{run_id}.jsonl  # Per-frame analysis cache
+│   └── hybrid_peak_statistics_{session_id}.csv # Hybrid detection results (if enabled)
+├── roi1/                          # ROI1 large region captures
+│   └── roi1_{frame_index:06d}.png
+├── roi2/                          # ROI2 small region extracts
+│   └── roi2_{frame_index:06d}.png
+├── roi3/                          # ROI3 extended vertical regions (if enabled)
+│   └── roi3_{frame_index:06d}.png
+├── wave/                          # Waveform visualization plots
+│   ├── wave_{frame_index:06d}.png
+│   └── roi1_wave_{frame_index:06d}.png  # ROI1 waveform data (if enabled)
+├── logs/                          # Daily log files with rotation
+│   └── roi_peak_daemon_{YYYY-MM-DD}.log
+└── tmp/                           # Temporary files (auto-cleaned)
+```
+
+### CSV Export Format
+**Peak Statistics CSV** (`peak_statistics_*.csv`):
+```csv
+timestamp,frame_index,peak_start,peak_end,peak_color,peak_value,pre_avg,post_avg,frame_difference,roi1_coords,roi2_coords,roi3_coords,session_id,roi1_peak_id
+2025-12-26T10:30:45,349,345,350,green,142.3,45.2,67.8,22.6,"1280,80,1920,980","1340,120,1420,180","1330,100,1410,200","session_001",roi1_349_345
+```
+
+**Analysis Cache JSONL** (`roi_analysis_cache_*.jsonl`):
+```jsonl
+{"type":"meta","cache_version":1,"created_at":"2025-12-26T10:30:00","session_id":"session_001",...}
+{"type":"frame","frame_index":349,"timestamp":"2025-12-26T10:30:45","roi1_avg":52.3,"roi2_avg":142.3,"intersection":{"x":1380,"y":150},...}
+{"type":"session_end","ended_at":"2025-12-26T10:35:00","reason":"video_complete"}
+```
+
+### File Naming Conventions
+- **CSV Files**: `peak_statistics_{video_name}_{timestamp}.csv` (batch mode) or `peak_statistics_{timestamp}.csv` (single mode)
+- **ROI Images**: `{roi_type}_{frame_index:06d}.png` (6-digit zero-padded frame index)
+- **Waveform Plots**: `wave_{frame_index:06d}.png` or `roi1_wave_{frame_index:06d}.png`
+- **Analysis Cache**: `roi_analysis_cache_{session_id}_{run_id}.jsonl` (run_id is 12-char hex)
+- **Log Files**: `roi_peak_daemon_{YYYY-MM-DD}.log` (daily rotation)
