@@ -70,6 +70,9 @@ class SimpleFEMConfigGUI:
         self.component_count_var = tk.StringVar(value="0")
         self.threshold_percentage_var = tk.StringVar(value="0.00%")
 
+        # ROI3列平均灰度差值
+        self.column_mean_diff_var = tk.StringVar(value="---")
+
         # 上一帧平均灰度值（用于计算差值）
         self.prev_frame_avg_gray = None
         self.frame_diff_var = tk.StringVar(value="--")
@@ -412,6 +415,16 @@ class SimpleFEMConfigGUI:
         self.alpha_value_label = ttk.Label(overlay_frame, text="0.5", font=('Courier', 9))
         self.alpha_value_label.pack(side=tk.LEFT)
 
+        # ROI3列平均灰度差值显示
+        column_mean_frame = ttk.Frame(threshold_test_frame)
+        column_mean_frame.pack(fill=tk.X, pady=(5, 0))
+
+        ttk.Label(column_mean_frame, text="ROI3列平均灰度差值:",
+                  font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 5))
+        self.column_mean_diff_label = ttk.Label(column_mean_frame, textvariable=self.column_mean_diff_var,
+                                                 font=('Arial', 10), foreground='green')
+        self.column_mean_diff_label.pack(side=tk.LEFT)
+
         # 热力图控制区域 (在叠加控制区域下方) - 已隐藏
         # heatmap_frame = ttk.Frame(threshold_test_frame)
         # heatmap_frame.pack(fill=tk.X, pady=(5, 0))
@@ -620,6 +633,13 @@ class SimpleFEMConfigGUI:
         roi3_curve_legend.pack(side=tk.LEFT, padx=2)
         roi3_curve_legend.create_line(2, 12, 23, 3, fill='blue', width=2)
         ttk.Label(curve_legend_content, text="ROI3像素分布", font=('Arial', 9)).pack(side=tk.LEFT, padx=(0, 10))
+
+        # ROI3列平均灰度值曲线图例
+        column_legend_canvas = tk.Canvas(curve_legend_content, width=30, height=15, bg='white', highlightthickness=0)
+        column_legend_canvas.pack(side=tk.LEFT, padx=2)
+        # 绘制绿色虚线
+        column_legend_canvas.create_line(2, 7, 28, 7, fill='green', width=2, dash=(5, 3))
+        ttk.Label(curve_legend_content, text="ROI3列平均", font=('Arial', 9)).pack(side=tk.LEFT, padx=(0, 10))
 
         # 移除阈值线图例 - 灰度直方图不需要显示阈值线
         # threshold_legend = tk.Canvas(curve_legend_content, width=25, height=15, bg='white')
@@ -1484,7 +1504,7 @@ class SimpleFEMConfigGUI:
             # 添加坐标轴标签
             self.curve_canvas.create_text(
                 margin_left + plot_width // 2, canvas_height - 15,
-                text="灰度值 (0-255)", fill='black', font=('Arial', 12, 'bold')
+                text="X: 灰度值(0-255) / 列号 | Y: 像素数 / 灰度值", fill='black', font=('Arial', 12, 'bold')
             )
             self.curve_canvas.create_text(
                 25, margin_top + plot_height // 2,
@@ -1635,6 +1655,85 @@ class SimpleFEMConfigGUI:
                     roi3_points, fill='blue', width=2, smooth=False
                 )
 
+            # ========== 新增：绘制ROI3列平均灰度值曲线 ==========
+            # 从ROI1裁剪区域中提取ROI3并计算列平均灰度值
+            try:
+                # 确保ROI3坐标在有效范围内
+                roi3_x_clamped = max(0, min(roi3_x, roi1_width - 1))
+                roi3_y_clamped = max(0, min(roi3_y, roi1_height - 1))
+                roi3_x2 = min(roi1_width, roi3_x + roi3_width)
+                roi3_y2 = min(roi1_height, roi3_y + roi3_height)
+                roi3_width_actual = roi3_x2 - roi3_x_clamped
+                roi3_height_actual = roi3_y2 - roi3_y_clamped
+
+                if roi3_width_actual > 0 and roi3_height_actual > 0:
+                    # 从ROI1裁剪区域中提取ROI3
+                    roi3_region = roi1_region.crop((
+                        roi3_x_clamped,
+                        roi3_y_clamped,
+                        roi3_x2,
+                        roi3_y2
+                    ))
+
+                    # 计算列平均灰度值
+                    column_means = self.compute_roi3_column_mean_gray(roi3_region)
+
+                    # 绘制列平均灰度值曲线（绿色虚线）
+                    if column_means and len(column_means) > 0:
+                        column_curve_points = []
+                        num_columns = len(column_means)
+
+                        # 计算列平均灰度值的最大值、最小值和差值
+                        max_mean_gray = max(column_means)
+                        min_mean_gray = min(column_means)
+                        diff_mean_gray = max_mean_gray - min_mean_gray
+
+                        # 更新差值显示标签（保留2位小数）
+                        self.column_mean_diff_var.set(f"{diff_mean_gray:.2f}")
+
+                        for col_idx, mean_gray in enumerate(column_means):
+                            # X轴：列号直接映射（0到num_columns-1映射到0到plot_width）
+                            if num_columns > 1:
+                                canvas_x = margin_left + (col_idx * plot_width // (num_columns - 1))
+                            else:
+                                canvas_x = margin_left + plot_width // 2
+
+                            # Y轴：灰度值直接映射（0-255映射到0-max_count）
+                            # 这样灰度值128会显示在Y轴中间位置
+                            # 注意：这里将灰度值0-255映射到Y轴的0-max_count范围
+                            canvas_y = margin_top + plot_height - (mean_gray * plot_height // max_count)
+
+                            column_curve_points.extend([canvas_x, canvas_y])
+
+                        # 使用平滑线绘制
+                        if len(column_curve_points) >= 4:  # 至少2个点
+                            self.curve_canvas.create_line(
+                                column_curve_points,
+                                fill='green',
+                                width=2,
+                                smooth=True,
+                                dash=(5, 3)  # 虚线样式，便于区分
+                            )
+
+                            # 在曲线终点标注列数
+                            last_x = column_curve_points[-2]
+                            last_y = column_curve_points[-1]
+                            self.curve_canvas.create_text(
+                                last_x + 10, last_y,
+                                text=f"列平均({num_columns}列)",
+                                fill='green',
+                                font=('Arial', 9),
+                                anchor='w'
+                            )
+
+                            print(f"[INFO] ROI3列平均曲线已绘制: {num_columns}列")
+
+            except Exception as e:
+                print(f"[ERROR] 绘制ROI3列平均灰度值曲线失败: {e}")
+                import traceback
+                traceback.print_exc()
+            # ========== 新增代码结束 ==========
+
             # 添加X轴刻度（灰度值）
             x_ticks = [0, 64, 128, 192, 255]
             for gray_val in x_ticks:
@@ -1740,6 +1839,37 @@ class SimpleFEMConfigGUI:
 
         except Exception as e:
             print(f"计算灰度直方图失败: {e}")
+            return []
+
+    def compute_roi3_column_mean_gray(self, roi3_image):
+        """
+        计算ROI3图像每一列的平均灰度值
+
+        Args:
+            roi3_image: PIL Image对象（ROI3区域图像）
+
+        Returns:
+            list: 每一列的平均灰度值列表（长度=ROI3宽度）
+        """
+        try:
+            import numpy as np
+
+            # 转换为灰度图像
+            if roi3_image.mode != 'L':
+                roi3_image = roi3_image.convert('L')
+
+            # 转换为numpy数组
+            roi3_array = np.array(roi3_image)
+
+            # 计算每一列的平均灰度值（沿垂直方向axis=0计算列均值）
+            # roi3_array shape: (height, width)
+            # np.mean(axis=0) 对每一列求均值，返回长度为width的数组
+            column_means = np.mean(roi3_array, axis=0)
+
+            return column_means.tolist()
+
+        except Exception as e:
+            print(f"[ERROR] 计算ROI3列平均灰度值失败: {e}")
             return []
 
     def on_curve_canvas_mousewheel(self, event):

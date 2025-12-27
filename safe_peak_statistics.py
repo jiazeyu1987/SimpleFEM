@@ -143,6 +143,15 @@ class SafePeakStatistics:
                     'pre_peak_frame_end',
                     'post_peak_frame_start',
                     'post_peak_frame_end',
+                    # G1/G2覆盖字段
+                    'g1_value',
+                    'g2_value',
+                    'g1_g2_override_applied',
+                    'g1_g2_override_frame_idx',
+                    # 列灰度差值字段
+                    'column_diff_value',
+                    'column_diff_override_applied',
+                    'column_diff_override_frame_idx',
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -208,9 +217,14 @@ class SafePeakStatistics:
                     for hybrid_peak in hybrid_peaks:
                         peak_start, peak_end = hybrid_peak['peak_interval']
                         roi1_peak_id = hybrid_peak.get('roi1_peak_id', '')
+                        peak_color = hybrid_peak.get('color', 'unknown')
+
+                        logging.info(f"[统计系统] 处理混合检测波峰: [{peak_start}-{peak_end}], {peak_color}色, ROI1 ID: {roi1_peak_id}")
 
                         # 第一层去重：ROI1波峰唯一ID检查
                         if roi1_peak_id and roi1_peak_id in self.processed_roi1_peak_ids:
+                            logging.warning(f"[统计系统-ROI1 ID去重] 波峰[{peak_start}-{peak_end}] ({peak_color}色) 被过滤: "
+                                          f"ROI1波峰ID {roi1_peak_id} 已处理过")
                             results.append({
                                 **hybrid_peak,
                                 "action": "skipped",
@@ -255,6 +269,38 @@ class SafePeakStatistics:
                         method = hybrid_peak.get('method', 'unknown')
                         confidence = hybrid_peak.get('confidence', 0.0)
                         self._add_log(f"添加混合检测{color}色波峰: [{peak_start},{peak_end}], 方法:{method}, 置信度:{confidence:.2f}")
+
+                    # 计算并打印列灰度差值统计信息
+                    column_diff_values = []
+                    added_count = 0
+                    green_count = 0
+                    red_count = 0
+
+                    for result in results:
+                        if result.get('action') == 'added':
+                            added_count += 1
+                            color = result.get('peak_type', '')
+                            if color == 'green':
+                                green_count += 1
+                            elif color == 'red':
+                                red_count += 1
+
+                            col_diff = result.get('column_diff_value')
+                            if col_diff and col_diff != '':
+                                try:
+                                    column_diff_values.append(float(col_diff))
+                                except (ValueError, TypeError):
+                                    pass
+
+                    if column_diff_values:
+                        max_column_diff = max(column_diff_values)
+                        min_column_diff = min(column_diff_values)
+                        avg_column_diff = sum(column_diff_values) / len(column_diff_values)
+                        print(f"[统计] ROI3列灰度差值 - 最大值: {max_column_diff:.2f}, 最小值: {min_column_diff:.2f}, 平均值: {avg_column_diff:.2f}, 样本数: {len(column_diff_values)}")
+                    else:
+                        print(f"[统计] ROI3列灰度差值 - 无有效数据")
+
+                    print(f"[统计] 本批次添加波峰 - 总数: {added_count} (绿色: {green_count}, 红色: {red_count})")
 
                     return results
 
@@ -564,6 +610,11 @@ class SafePeakStatistics:
             'g1_value': round(float(g1_value), 2) if g1_value is not None else '',
             'g2_value': round(float(g2_value), 2) if g2_value is not None else '',
             'g1_g2_override_applied': bool(g1_g2_override_applied),
+            'g1_g2_override_frame_idx': int(hybrid_peak.get('g1_g2_override_frame_idx', -1)) if hybrid_peak.get('g1_g2_override_frame_idx') is not None else '',
+            # 列灰度差值字段（新增）
+            'column_diff_value': round(float(hybrid_peak.get('column_diff_value', 0)), 2) if hybrid_peak.get('column_diff_value') is not None else '',
+            'column_diff_override_applied': bool(hybrid_peak.get('column_diff_override_applied', False)),
+            'column_diff_override_frame_idx': int(hybrid_peak.get('column_diff_override_frame_idx', -1)) if hybrid_peak.get('column_diff_override_frame_idx') is not None else '',
 
             # 兼容字段
             'intersection': intersection,
@@ -623,55 +674,33 @@ class SafePeakStatistics:
             return 0.0
 
     def _is_duplicate_peak(self, peak_data: Dict[str, Any]) -> bool:
-        """检查是否为重复波峰（基于前后帧平均值去重）"""
+        """检查是否为重复波峰（基于前后帧平均值去重）- 已禁用"""
         try:
-            current_pre_avg = peak_data['pre_peak_avg']
-            current_post_avg = peak_data['post_peak_avg']
+            current_type = peak_data.get('peak_type', 'unknown')
             current_frame_index = peak_data['frame_index']
+            current_max = peak_data.get('peak_max_value', 0)
 
-            # 检查最近的5个波峰（task要求的窗口大小）
-            for recent_peak in self.recent_peaks[-self.duplicate_check_window:]:
-                recent_pre_avg = recent_peak.get('pre_peak_avg', 0)
-                recent_post_avg = recent_peak.get('post_peak_avg', 0)
-
-                # 增强的重复检测：考虑时间间隔和峰值高度
-                frame_diff = abs(current_frame_index - recent_peak.get('frame_index', 0))
-
-                # 前后帧平均值都接近（容差2.0）且时间间隔较小时才视为重复
-                pre_avg_diff = abs(recent_pre_avg - current_pre_avg)
-                post_avg_diff = abs(recent_post_avg - current_post_avg)
-
-                if (pre_avg_diff <= 2.0 and post_avg_diff <= 2.0):
-                    # 如果时间间隔超过200帧，不视为重复（不同时间段的相似信号）
-                    if frame_diff > 200:
-                        continue
-
-                    # 如果当前波峰峰值明显更高（>5%），不视为重复
-                    current_max = peak_data.get('peak_max_value', 0)
-                    recent_max = recent_peak.get('peak_max_value', 0)
-                    if current_max > recent_max * 1.05:  # 峰值高5%以上
-                        continue
-
-                    return True
+            # 第一层去重已禁用，直接通过
+            logging.info(f"[去重-第一层-已禁用] {current_type}波峰帧{current_frame_index} (峰值={current_max:.2f}) 直接通过")
             return False
         except Exception as e:
-            self._add_log(f"去重检查失败: {e}", level="ERROR")
+            logging.error(f"[去重-第一层] 检查失败: {e}", exc_info=True)
             return False
 
     def _is_consecutive_duplicate(self, peak_data: Dict[str, Any], curve: List[float], start_frame: int, end_frame: int) -> bool:
         """检查是否为连续重复波峰（支持跨颜色去重和优先级处理）"""
         try:
-            # 调试信息：记录函数调用
             current_type = peak_data['peak_type']
             current_frame_index = peak_data['frame_index']
             current_max_value = peak_data['peak_max_value']
 
-            self._add_log(f"[调试] _is_consecutive_duplicate被调用: {current_type}波峰帧{current_frame_index}, 峰值{current_max_value:.3f}")
-            self._add_log(f"[调试] 配置: 去重启用={self.consecutive_deduplication_enabled}, 跨颜色={self.cross_color_deduplication_enabled}, 窗口={self.consecutive_frame_window}帧")
-            self._add_log(f"[调试] 颜色优先级: {self.color_priority}")
+            logging.info(f"[去重-第二层] 检查{current_type}波峰帧{current_frame_index}, 峰值{current_max_value:.3f}")
+            logging.info(f"[去重-第二层] 配置: 去重启用={self.consecutive_deduplication_enabled}, "
+                        f"跨颜色={self.cross_color_deduplication_enabled}, 窗口={self.consecutive_frame_window}帧")
+            logging.info(f"[去重-第二层] 颜色优先级: {self.color_priority}")
 
             if not self.consecutive_deduplication_enabled:
-                self._add_log(f"[调试] 去重功能已禁用，返回False")
+                logging.info(f"[去重-第二层] 去重功能已禁用，通过第二层去重")
                 return False
 
             # 检查最近的波峰中是否有跨颜色连续波峰
@@ -682,10 +711,13 @@ class SafePeakStatistics:
 
                 # 检查是否在时间窗口内
                 time_diff = abs(current_frame_index - recent_frame_index)
-                self._add_log(f"[调试] 检查历史波峰: {recent_type}帧{recent_frame_index}, 峰值{recent_max_value:.3f}, 时间差={time_diff}帧")
+                logging.debug(f"[去重-第二层] 检查历史波峰: {recent_type}帧{recent_frame_index}, "
+                            f"峰值{recent_max_value:.3f}, 时间差={time_diff}帧")
 
                 if time_diff <= self.consecutive_frame_window:
-                    self._add_log(f"[调试] 在时间窗口内，检查峰值相同性: |{current_max_value:.3f} - {recent_max_value:.3f}| = {abs(current_max_value - recent_max_value):.3f}")
+                    logging.debug(f"[去重-第二层] 在时间窗口内({time_diff}<={self.consecutive_frame_window})，"
+                                f"检查峰值相同性: |{current_max_value:.3f} - {recent_max_value:.3f}| = "
+                                f"{abs(current_max_value - recent_max_value):.3f}")
 
                     # 检查峰值是否完全相同（考虑浮点数精度）
                     if abs(current_max_value - recent_max_value) < 0.01:
@@ -698,37 +730,47 @@ class SafePeakStatistics:
                         if current_priority > recent_priority:
                             # 当前波峰优先级更高，移除之前较低优先级的波峰
                             self._remove_lower_consecutive_peak(recent_peak)
-                            self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 优先级({current_priority}) 高于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) 优先级({recent_priority})，移除较低优先级")
+                            logging.info(f"[去重-第二层] {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) "
+                                        f"优先级({current_priority}) 高于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) "
+                                        f"优先级({recent_priority})，移除较低优先级波峰，通过第二层去重")
                             return False
                         elif current_priority < recent_priority:
                             # 当前波峰优先级更低，跳过当前波峰
-                            self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 优先级({current_priority}) 低于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) 优先级({recent_priority})，跳过当前波峰")
+                            logging.warning(f"[去重-第二层] {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) "
+                                          f"优先级({current_priority}) 低于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) "
+                                          f"优先级({recent_priority})，被过滤")
                             return True
                         else:
                             # 相同优先级（同颜色），按时间顺序处理
                             if current_frame_index <= recent_frame_index:
-                                self._add_log(f"相同优先级去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 与 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) 时间较晚，跳过当前波峰")
+                                logging.warning(f"[去重-第二层] {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) "
+                                              f"与 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) "
+                                              f"峰值相同且时间较晚或相同，被过滤")
                                 return True
                             else:
                                 # 当前波峰时间更晚，移除之前的
                                 self._remove_lower_consecutive_peak(recent_peak)
-                                self._add_log(f"相同优先级去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 晚于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f})，移除较早波峰")
+                                logging.info(f"[去重-第二层] {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) "
+                                            f"晚于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f})，"
+                                            f"移除较早波峰，通过第二层去重")
                                 return False
                     elif current_max_value < recent_max_value:
                         # 当前波峰更低，是重复波峰
-                        self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(高度{current_max_value:.1f}) 低于 {recent_type}波峰帧{recent_frame_index}(高度{recent_max_value:.1f})，跳过当前波峰")
+                        logging.warning(f"[去重-第二层] {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) "
+                                      f"低于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f})，被过滤")
                         return True
                     else:
                         # 如果当前波峰更高，移除之前的较低波峰
                         self._remove_lower_consecutive_peak(recent_peak)
-                        self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(高度{current_max_value:.1f}) 高于 {recent_type}波峰帧{recent_frame_index}(高度{recent_max_value:.1f})，移除较低的")
+                        logging.info(f"[去重-第二层] {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) "
+                                    f"高于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f})，"
+                                    f"移除较低波峰，通过第二层去重")
                         return False
 
-            # 添加循环结束的调试信息
-            self._add_log(f"[调试] 检查完成，未找到重复波峰，返回False")
-
+            logging.info(f"[去重-第二层] {current_type}波峰帧{current_frame_index} 未找到重复波峰，通过第二层去重")
             return False
         except Exception as e:
+            logging.error(f"[去重-第二层] 检查失败: {e}", exc_info=True)
             self._add_log(f"[调试] 连续同色去重检查失败: {e}", level="ERROR")
             return False
 
@@ -737,16 +779,23 @@ class SafePeakStatistics:
         try:
             pre_avg = peak_data.get('pre_peak_avg', 0)
             post_avg = peak_data.get('post_peak_avg', 0)
+            peak_type = peak_data.get('peak_type', 'unknown')
+            frame_index = peak_data.get('frame_index', 0)
+            peak_max = peak_data.get('peak_max_value', 0)
+
+            logging.info(f"[去重-第三层] 检查{peak_type}波峰帧{frame_index}: "
+                        f"前帧平均={pre_avg:.2f}, 后帧平均={post_avg:.2f}, 峰值={peak_max:.2f}")
 
             # 如果前后帧平均值都是0，则认为数据无效
             if pre_avg == 0 or post_avg == 0:
-                peak_type = peak_data.get('peak_type', 'unknown')
-                frame_index = peak_data.get('frame_index', 0)
-                self._add_log(f"无效波峰数据过滤: {peak_type}波峰帧{frame_index}, 前帧平均={pre_avg:.2f}, 后帧平均={post_avg:.2f}")
+                logging.warning(f"[去重-第三层] {peak_type}波峰帧{frame_index} 被过滤: "
+                              f"数据无效 (前帧平均={pre_avg:.2f}, 后帧平均={post_avg:.2f}, 至少一个为0)")
                 return True
 
+            logging.info(f"[去重-第三层] {peak_type}波峰帧{frame_index} 数据有效，通过第三层去重")
             return False
         except Exception as e:
+            logging.error(f"[去重-第三层] 检查失败: {e}", exc_info=True)
             self._add_log(f"检查无效波峰数据失败: {e}", level="ERROR")
             return False
 
@@ -856,6 +905,11 @@ class SafePeakStatistics:
                 'g1_value',
                 'g2_value',
                 'g1_g2_override_applied',
+                'g1_g2_override_frame_idx',
+                # 列灰度差值字段（新增）
+                'column_diff_value',
+                'column_diff_override_applied',
+                'column_diff_override_frame_idx',
             ]
 
             # 过滤数据，只包含CSV需要的字段（使用.get()兼容旧数据）
@@ -935,6 +989,30 @@ class SafePeakStatistics:
     def save_csv_file(self) -> Optional[str]:
         """保存CSV文件并返回路径（用于UI调用）"""
         try:
+            # 打印整个会话的列灰度差值统计信息
+            if self.stats_data:
+                column_diff_values = []
+                for peak_data in self.stats_data:
+                    col_diff = peak_data.get('column_diff_value')
+                    if col_diff and col_diff != '':
+                        try:
+                            column_diff_values.append(float(col_diff))
+                        except (ValueError, TypeError):
+                            pass
+
+                if column_diff_values:
+                    max_column_diff = max(column_diff_values)
+                    min_column_diff = min(column_diff_values)
+                    avg_column_diff = sum(column_diff_values) / len(column_diff_values)
+                    total_peaks = len(self.stats_data)
+                    print(f"\n{'='*60}")
+                    print(f"[会话统计] ROI3列灰度差值分析")
+                    print(f"[会话统计] 最大值: {max_column_diff:.2f}")
+                    print(f"[会话统计] 最小值: {min_column_diff:.2f}")
+                    print(f"[会话统计] 平均值: {avg_column_diff:.2f}")
+                    print(f"[会话统计] 样本数: {len(column_diff_values)}/{total_peaks} 个波峰")
+                    print(f"{'='*60}\n")
+
             if os.path.exists(self.csv_path):
                 return os.path.abspath(self.csv_path)
             else:

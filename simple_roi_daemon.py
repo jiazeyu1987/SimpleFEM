@@ -159,6 +159,7 @@ def manage_threshold_protection(
     current_threshold: float,
     has_peaks: bool,
     frame_time: float,
+    frame_index: int,
     # State variables (passed by reference)
     protection_active: bool,
     protection_end_time: float,
@@ -179,6 +180,7 @@ def manage_threshold_protection(
         current_threshold: 当前阈值
         has_peaks: 当前帧是否检测到波峰
         frame_time: 当前帧的时间戳
+        frame_index: 当前帧索引
         protection_active: 保护状态是否激活
         protection_end_time: 保护结束时间
         consecutive_below: 连续低于阈值的帧数
@@ -207,13 +209,17 @@ def manage_threshold_protection(
         should_protect = True
         last_waveform_time = current_time
         if not protection_active:
-            print(f"[阈值保护] 波形触发保护: 灰度={current_gray:.1f} >= 阈值={current_threshold:.1f}")
+            msg = f"[阈值保护] 帧{frame_index} 波形触发保护: 灰度={current_gray:.1f} >= 阈值={current_threshold:.1f}"
+            logging.info(msg)
+            print(msg)
 
     # 2. 波峰结果触发：检测到波峰时激活保护
     elif has_peaks and not protection_active:
         should_protect = True
         last_waveform_time = current_time
-        print(f"[阈值保护] 波峰触发保护: 检测到波峰")
+        msg = f"[阈值保护] 帧{frame_index} 波峰触发保护: 检测到波峰"
+        logging.info(msg)
+        print(msg)
 
     # 3. 检查是否可以解除保护
     if should_protect:
@@ -234,7 +240,9 @@ def manage_threshold_protection(
             should_protect = False
             consecutive_below = 0
             frames_since_end = 0
-            print(f"[阈值保护] 解除保护: 满足时间延迟({recovery_delay_frames}帧)和稳定性({stability_frames}帧)条件")
+            msg = f"[阈值保护] 帧{frame_index} 解除保护: 满足时间延迟({recovery_delay_frames}帧)和稳定性({stability_frames}帧)条件"
+            logging.info(msg)
+            print(msg)
         else:
             # 更新结束时间
             protection_end_time = planned_end_time
@@ -585,6 +593,40 @@ def compute_roi3_g1_g2_ranges(image: Image.Image) -> tuple:
     return g1_percentage, g2_percentage
 
 
+def compute_roi3_column_mean_diff(image: Image.Image) -> float:
+    """
+    计算ROI3图像每一列的平均灰度值的最大值与最小值之差
+
+    Args:
+        image: PIL Image对象（ROI3区域图像）
+
+    Returns:
+        float: 列平均灰度值的最大值与最小值之差
+    """
+    try:
+        import numpy as np
+
+        # 转换为灰度图像
+        if image.mode != 'L':
+            image = image.convert('L')
+
+        # 转换为numpy数组
+        roi3_array = np.array(image)
+
+        # 计算每一列的平均灰度值
+        column_means = np.mean(roi3_array, axis=0)
+
+        # 计算最大值与最小值之差
+        max_mean = float(np.max(column_means))
+        min_mean = float(np.min(column_means))
+        diff = max_mean - min_mean
+
+        return diff
+
+    except Exception as e:
+        print(f"[ERROR] 计算ROI3列灰度差值失败: {e}")
+        return 0.0
+
 
 def setup_peak_logger() -> logging.Logger:
     """Create a logger that writes plain text lines and rotates daily."""
@@ -658,6 +700,7 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
             differenceThreshold=999.0,  # 设为很大的值，让ROI1只检测波峰，不做颜色分类
         )
     except Exception as e:
+        logging.error(f"[混合检测] ROI1波峰检测失败: {e}")
         print(f"[混合检测] ROI1波峰检测失败: {e}")
         return []
 
@@ -669,58 +712,94 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
     max_width = config.get('max_peak_width', 100)
     new_peaks: List[Tuple[int, int, str, int]] = []
     duplicate_count = 0
+    width_filtered_count = 0
+
+    current_frame_index = config.get('frame_index', 0)
+    logging.info(f"[混合检测-ROI1过滤] 帧{current_frame_index} 开始过滤ROI1检测到的{len(roi1_all_peaks)}个波峰 "
+                f"(宽度范围: {min_width}-{max_width}帧)")
 
     for peak_start, peak_end in roi1_all_peaks:
         peak_width = peak_end - peak_start + 1
-        if min_width <= peak_width <= max_width:
-            # Use absolute peak max position as a stable dedup key so the same
-            # physical peak is not re-detected when the sliding buffer shifts.
-            peak_slice = roi1_curve[peak_start : peak_end + 1]
-            local_max_offset = 0
-            if peak_slice:
-                local_max_offset = max(range(len(peak_slice)), key=lambda i: peak_slice[i])
-            abs_peak_max = buffer_start_frame_index + peak_start + local_max_offset
-            peak_key = abs_peak_max
 
-            # 检查是否已经处理过这个ROI1波峰
-            if peak_key in processed_peaks:
-                duplicate_count += 1
-                print(f"[混合检测] ROI1波峰[{peak_start}-{peak_end}]已处理过(peak_max={abs_peak_max})，跳过")
-                continue
+        # 宽度过滤
+        if peak_width < min_width or peak_width > max_width:
+            width_filtered_count += 1
+            logging.debug(f"[混合检测-ROI1宽度过滤] 波峰[{peak_start}-{peak_end}] 宽度={peak_width}帧 "
+                         f"不在范围[{min_width}-{max_width}]内，被过滤")
+            continue
 
-            # 新的ROI1波峰，生成唯一ID
-            peak_counter += 1
-            peak_id = f"ROI1_MAX_{abs_peak_max:06d}"
-            processed_peaks[peak_key] = peak_id
+        # Use absolute peak max position as a stable dedup key so the same
+        # physical peak is not re-detected when the sliding buffer shifts.
+        peak_slice = roi1_curve[peak_start : peak_end + 1]
+        local_max_offset = 0
+        if peak_slice:
+            local_max_offset = max(range(len(peak_slice)), key=lambda i: peak_slice[i])
+        abs_peak_max = buffer_start_frame_index + peak_start + local_max_offset
+        peak_key = abs_peak_max
 
-            new_peaks.append((peak_start, peak_end, peak_id, abs_peak_max))
-            print(f"[混合检测] 新ROI1波峰[{peak_start}-{peak_end}] -> ID: {peak_id}")
+        # 检查是否已经处理过这个ROI1波峰
+        if peak_key in processed_peaks:
+            duplicate_count += 1
+            existing_id = processed_peaks[peak_key]
+            logging.debug(f"[混合检测-ROI1去重] 波峰[{peak_start}-{peak_end}] (peak_max={abs_peak_max}) "
+                         f"已处理过(ID:{existing_id})，跳过")
+            continue
 
-    print(f"[混合检测] ROI1检测到{len(roi1_all_peaks)}个波峰，过滤后新增{len(new_peaks)}个，重复{duplicate_count}个")
+        # 新的ROI1波峰，生成唯一ID
+        peak_counter += 1
+        peak_id = f"ROI1_MAX_{abs_peak_max:06d}"
+        processed_peaks[peak_key] = peak_id
+
+        new_peaks.append((peak_start, peak_end, peak_id, abs_peak_max))
+        logging.info(f"[混合检测-ROI1新波峰] 帧{current_frame_index} 波峰[{peak_start}-{peak_end}] {peak_width}帧 -> ID: {peak_id}")
+
+    # 获取当前帧索引
+    current_frame_index = config.get('frame_index', 0)
+    logging.info(f"[混合检测-ROI1过滤完成] 帧{current_frame_index} ROI1原始波峰{len(roi1_all_peaks)}个 -> "
+                f"宽度过滤{width_filtered_count}个 + 重复过滤{duplicate_count}个 = 保留{len(new_peaks)}个新波峰")
 
     # 2. 对每个新的ROI1波峰，使用ROI2数据进行颜色判定
     for peak_start, peak_end, peak_id, abs_peak_max in new_peaks:
         peak_width = peak_end - peak_start + 1
 
         # 使用ROI2数据进行颜色判定
-        # 从配置中获取G1/G2曲线
+        # 从配置中获取G1/G2曲线和列灰度差值曲线
         roi3_g1_curve = config.get('roi3_g1_curve', None)
         roi3_g2_curve = config.get('roi3_g2_curve', None)
+        roi3_column_diff_curve = config.get('roi3_column_diff_curve', None)
 
         color_result = determine_roi2_color_in_interval(
             peak_start, peak_end, roi2_curve, config,
             roi3_g1_curve=roi3_g1_curve,
-            roi3_g2_curve=roi3_g2_curve
+            roi3_g2_curve=roi3_g2_curve,
+            roi3_column_diff_curve=roi3_column_diff_curve
         )
 
         # 检查是否被frame_diff过滤掉
         if color_result.get("method") == "error_filtered":
-            print(f"[混合检测] frame_diff异常被过滤，跳过波峰[{peak_start}-{peak_end}] (ID:{peak_id}): {color_result.get('error', '未知错误')}")
+            current_frame_index = config.get('frame_index', 0)
+            error_msg = color_result.get('error', '未知错误')
+            logging.warning(f"[混合检测-ROI2过滤] 帧{current_frame_index} 波峰[{peak_start}-{peak_end}] (ID:{peak_id}) "
+                          f"被过滤: frame_diff异常 - {error_msg}")
             continue
 
-        if not bool(color_result.get("roi2_valid", True)) and bool(config.get("skip_when_roi2_invalid", True)):
-            print(f"[混合检测] ROI2数据无效，跳过波峰[{peak_start}-{peak_end}] (ID:{peak_id})")
+        # 检查ROI2数据是否有效
+        roi2_valid = bool(color_result.get("roi2_valid", True))
+        skip_when_invalid = bool(config.get("skip_when_roi2_invalid", True))
+
+        if not roi2_valid and skip_when_invalid:
+            current_frame_index = config.get('frame_index', 0)
+            # 尝试获取更多无效原因信息
+            variance = color_result.get('roi2_variance', 0)
+            frames_count = color_result.get('roi2_frames_count', 0)
+            logging.warning(f"[混合检测-ROI2过滤] 帧{current_frame_index} 波峰[{peak_start}-{peak_end}] (ID:{peak_id}) "
+                          f"被过滤: ROI2数据无效 (方差:{variance:.3f}, 帧数:{frames_count})")
             continue
+
+        if not roi2_valid:
+            current_frame_index = config.get('frame_index', 0)
+            logging.info(f"[混合检测-ROI2回退] 帧{current_frame_index} 波峰[{peak_start}-{peak_end}] (ID:{peak_id}) "
+                        f"ROI2数据无效但skip_when_roi2_invalid=False，继续处理")
 
         # 创建混合检测结果（包含ROI1唯一ID）
         hybrid_peak = {
@@ -736,12 +815,23 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
             'quality_score': color_result.get('quality_score', 0.0),
             # ROI1波峰唯一ID信息
             'roi1_peak_id': peak_id,
-            'roi1_peak_key': abs_peak_max
+            'roi1_peak_key': abs_peak_max,
+            # G1/G2覆盖字段
+            'g1_value': color_result.get('g1_value', None),
+            'g2_value': color_result.get('g2_value', None),
+            'g1_g2_override_applied': color_result.get('g1_g2_override_applied', False),
+            'g1_g2_override_frame_idx': color_result.get('g1_g2_override_frame_idx', None),
+            # 列灰度差值字段
+            'column_diff_value': color_result.get('column_diff_value', None),
+            'column_diff_override_applied': color_result.get('column_diff_override_applied', False),
+            'column_diff_override_frame_idx': color_result.get('column_diff_override_frame_idx', None),
         }
 
         hybrid_peaks.append(hybrid_peak)
 
-        print(f"[混合检测] 波峰[{peak_start}-{peak_end}] {peak_width}帧: {color_result['color']}色 "
+        # 获取当前帧索引
+        current_frame_index = config.get('frame_index', 0)
+        logging.info(f"[混合检测] 帧{current_frame_index} 波峰[{peak_start}-{peak_end}] {peak_width}帧: {color_result['color']}色 "
               f"(ID:{peak_id}, 方法:{color_result['method']}, 置信度:{color_result['confidence']:.2f})")
 
     # 返回结果和更新后的状态
@@ -752,9 +842,10 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                                    roi2_curve: List[float],
                                    config: Dict[str, Any],
                                    roi3_g1_curve: Optional[List[float]] = None,
-                                   roi3_g2_curve: Optional[List[float]] = None) -> Dict[str, Any]:
+                                   roi3_g2_curve: Optional[List[float]] = None,
+                                   roi3_column_diff_curve: Optional[List[float]] = None) -> Dict[str, Any]:
     """
-    在ROI1检测的波峰区间内，使用ROI2数据进行颜色判定（支持G1/G2覆盖）
+    在ROI1检测的波峰区间内，使用ROI2数据进行颜色判定（支持G1/G2覆盖和列灰度差值覆盖）
 
     Args:
         peak_start: 波峰开始帧
@@ -763,15 +854,18 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
         config: 配置参数
         roi3_g1_curve: ROI3的G1值曲线（与roi2_curve同步）- 可选
         roi3_g2_curve: ROI3的G2值曲线（与roi2_curve同步）- 可选
+        roi3_column_diff_curve: ROI3的列灰度差值曲线（与roi2_curve同步）- 可选
 
     Returns:
         颜色判定结果字典，包含:
         - color: 'green' or 'red'
         - method: 判定方法
         - confidence: 置信度
-        - g1_g2_override_applied: G1/G2覆盖是否应用（新增）
-        - g1_value: 使用的G1值（新增）
-        - g2_value: 使用的G2值（新增）
+        - g1_g2_override_applied: G1/G2覆盖是否应用
+        - g1_value: 使用的G1值
+        - g2_value: 使用的G2值
+        - column_diff_override_applied: 列灰度差值覆盖是否应用（新增）
+        - column_diff_value: 使用的列灰度差值（新增）
     """
     pre_frames = config.get('roi2_pre_frames', 5)
     post_frames = config.get('roi2_post_frames', 10)
@@ -781,6 +875,13 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
     roi2_min_gray = float(config.get("roi2_min_gray", 5.0))
     roi2_max_gray = float(config.get("roi2_max_gray", 250.0))
     fallback_enabled = config.get('fallback_enabled', True)
+
+    # 调试：打印传入的曲线长度
+    print(f"[DEBUG] determine_roi2_color_in_interval - peak[{peak_start}-{peak_end}], "
+          f"roi2_curve={len(roi2_curve)}, "
+          f"roi3_g1_curve={len(roi3_g1_curve) if roi3_g1_curve else 0}, "
+          f"roi3_g2_curve={len(roi3_g2_curve) if roi3_g2_curve else 0}, "
+          f"roi3_column_diff_curve={len(roi3_column_diff_curve) if roi3_column_diff_curve else 0}")
 
     try:
         # 检查ROI2数据是否充足
@@ -794,10 +895,15 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                     'frame_difference': 0.0,
                     'roi2_valid': False,
                     'error': f'ROI2数据不足({roi2_interval_length} < {min_frames})，回退到ROI1',
-                    # 新增G1/G2字段（默认值）
+                    'roi2_variance': 0.0,
+                    'roi2_frames_count': roi2_interval_length,
+                    # G1/G2字段（默认值）
                     'g1_g2_override_applied': False,
                     'g1_value': None,
                     'g2_value': None,
+                    # 列灰度差值字段（默认值）
+                    'column_diff_override_applied': False,
+                    'column_diff_value': None,
                 }
             else:
                 return {
@@ -806,7 +912,16 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                     'confidence': 0.0,
                     'frame_difference': 0.0,
                     'roi2_valid': False,
-                    'error': f'ROI2数据不足且未启用回退'
+                    'error': f'ROI2数据不足且未启用回退',
+                    'roi2_variance': 0.0,
+                    'roi2_frames_count': roi2_interval_length,
+                    # G1/G2字段（默认值）
+                    'g1_g2_override_applied': False,
+                    'g1_value': None,
+                    'g2_value': None,
+                    # 列灰度差值字段（默认值）
+                    'column_diff_override_applied': False,
+                    'column_diff_value': None,
                 }
 
         # 计算ROI2在波峰区间前的平均值
@@ -834,6 +949,17 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                 'post_avg': post_avg,
                 'roi2_valid': False,
                 'error': f'frame_difference异常(|{frame_difference:.1f}| > 15)，判定为错误数据',
+                'roi2_variance': 0.0,
+                'roi2_frames_count': roi2_interval_length,
+                # G1/G2字段（默认值）
+                'g1_g2_override_applied': False,
+                'g1_value': None,
+                'g2_value': None,
+                'g1_g2_override_frame_idx': None,
+                # 列灰度差值字段（默认值）
+                'column_diff_override_applied': False,
+                'column_diff_value': None,
+                'column_diff_override_frame_idx': None,
             }
 
         color = "green" if frame_difference >= color_threshold else "red"
@@ -842,7 +968,9 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
         g1_g2_override_applied = False
         g1_value_used = None
         g2_value_used = None
+        g1_g2_override_frame_idx = None  # 记录覆盖帧索引
 
+        # G1/G2覆盖逻辑
         if roi3_g1_curve and roi3_g2_curve:
             # 读取G1/G2配置
             g1_g2_conf = config.get("g1_g2_override", {})
@@ -851,38 +979,128 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
             g2_threshold = float(g1_g2_conf.get("g2_threshold", 20.0))
             use_peak_max = bool(g1_g2_conf.get("use_peak_max", True))
 
-            if g1_g2_enabled and color == "red":
-                # 提取波峰区间的G1/G2值
-                g1_values = []
-                g2_values = []
+            # 提取波峰区间的G1/G2值（无论颜色是什么都计算）
+            g1_values = []
+            g2_values = []
 
-                for frame_idx in range(peak_start, min(peak_end + 1, len(roi3_g1_curve))):
-                    if frame_idx < len(roi3_g1_curve) and frame_idx < len(roi3_g2_curve):
-                        g1_values.append(roi3_g1_curve[frame_idx])
-                        g2_values.append(roi3_g2_curve[frame_idx])
+            for frame_idx in range(peak_start, min(peak_end + 1, len(roi3_g1_curve))):
+                if frame_idx < len(roi3_g1_curve) and frame_idx < len(roi3_g2_curve):
+                    g1_values.append(roi3_g1_curve[frame_idx])
+                    g2_values.append(roi3_g2_curve[frame_idx])
 
-                # 根据配置选择G1/G2值
-                if g1_values and g2_values:
-                    if use_peak_max:
-                        g1_value = max(g1_values)
-                        g2_value = max(g2_values)
-                    else:
-                        # 使用波峰结束帧的值
-                        g1_value = g1_values[-1] if peak_end < len(roi3_g1_curve) else g1_values[0]
-                        g2_value = g2_values[-1] if peak_end < len(roi3_g2_curve) else g2_values[0]
+            # 根据配置选择G1/G2值（无论颜色是什么都记录）
+            if g1_values and g2_values:
+                if use_peak_max:
+                    # 找到G1最大值对应的索引（使用G1为基准）
+                    import numpy as np
+                    max_g1_idx = int(np.argmax(g1_values))
+                    # 使用同一帧的G1和G2值
+                    g1_value = g1_values[max_g1_idx]
+                    g2_value = g2_values[max_g1_idx]
+                    g1_g2_override_frame_idx = max_g1_idx  # 记录覆盖帧索引
+                else:
+                    # 使用波峰结束帧的值（同一帧）
+                    g1_value = g1_values[-1] if peak_end < len(roi3_g1_curve) else g1_values[0]
+                    g2_value = g2_values[-1] if peak_end < len(roi3_g2_curve) else g2_values[0]
+                    g1_g2_override_frame_idx = len(g1_values) - 1  # 记录覆盖帧索引
 
-                    g1_value_used = g1_value
-                    g2_value_used = g2_value
+                g1_value_used = g1_value
+                g2_value_used = g2_value
 
-                    # 检查是否满足覆盖条件
+                # 检查是否满足覆盖条件（只对红色波峰生效）
+                if g1_g2_enabled and color == "red":
                     if g1_value > g1_threshold and g2_value > g2_threshold:
                         color = "green"
                         g1_g2_override_applied = True
 
-                        # 输出覆盖日志
-                        print(f"[G1/G2覆盖] 波峰[{peak_start}-{peak_end}] RED→GREEN: "
+                        # 获取当前帧索引
+                        current_frame_index = config.get('frame_index', 0)
+                        buffer_start_frame_index = config.get('buffer_start_frame_index', 0)
+                        absolute_frame_idx = buffer_start_frame_index + g1_g2_override_frame_idx
+
+                        # 输出覆盖日志（包含帧索引）
+                        msg = (f"[G1/G2覆盖] 帧{absolute_frame_idx} 波峰[{peak_start}-{peak_end}] RED→GREEN: "
                               f"G1={g1_value:.2f}%, G2={g2_value:.2f}% "
                               f"(阈值: G1>{g1_threshold}%, G2>{g2_threshold}%)")
+                        logging.info(msg)
+                        print(msg)
+
+        # ROI3列灰度差值覆盖逻辑（新增）
+        column_diff_override_applied = False
+        column_diff_used = None
+        column_diff_override_frame_idx = None  # 记录覆盖帧索引
+
+        if roi3_column_diff_curve and roi3_g1_curve:
+            # 读取列灰度差值配置
+            column_diff_conf = config.get("roi3_column_diff_override", {})
+            column_diff_enabled = bool(column_diff_conf.get("enabled", True))
+            column_diff_threshold = float(column_diff_conf.get("threshold", 15.0))
+            use_peak_max = bool(column_diff_conf.get("use_peak_max", True))
+
+            # 记录配置信息
+            logging.debug(f"[列灰度差值覆盖] 配置: enabled={column_diff_enabled}, threshold={column_diff_threshold}, use_peak_max={use_peak_max}")
+
+            # 提取波峰区间的列灰度差值（无论颜色是什么都计算）
+            column_diff_values = []
+            for frame_idx in range(peak_start, min(peak_end + 1, len(roi3_column_diff_curve))):
+                if frame_idx < len(roi3_column_diff_curve):
+                    column_diff_values.append(roi3_column_diff_curve[frame_idx])
+
+            # 提取波峰区间的G1值（用于列灰度差值覆盖判定）
+            g1_values_for_column_diff = []
+            for frame_idx in range(peak_start, min(peak_end + 1, len(roi3_g1_curve))):
+                if frame_idx < len(roi3_g1_curve):
+                    g1_values_for_column_diff.append(roi3_g1_curve[frame_idx])
+
+            # 根据配置选择差值和G1值（无论颜色是什么都记录）
+            if column_diff_values and g1_values_for_column_diff:
+                if use_peak_max:
+                    # 找到G1最大值对应的索引（使用G1为基准，因为覆盖条件是基于G1的）
+                    import numpy as np
+                    max_g1_idx = int(np.argmax(g1_values_for_column_diff))
+                    # 使用同一帧的G1值和列灰度差值
+                    g1_for_column_diff = g1_values_for_column_diff[max_g1_idx]
+                    column_diff = column_diff_values[max_g1_idx]
+                    column_diff_override_frame_idx = max_g1_idx  # 记录覆盖帧索引（使用G1最大值的帧）
+                else:
+                    # 使用波峰结束帧的值（同一帧）
+                    column_diff = column_diff_values[-1] if peak_end < len(roi3_column_diff_curve) else column_diff_values[0]
+                    g1_for_column_diff = g1_values_for_column_diff[-1] if peak_end < len(roi3_g1_curve) else g1_values_for_column_diff[0]
+                    column_diff_override_frame_idx = len(column_diff_values) - 1  # 记录覆盖帧索引
+
+                column_diff_used = column_diff
+
+                # 调试输出（改为logging.debug）
+                msg = (f"[DEBUG] 列灰度差值覆盖判定 - 波峰[{peak_start}-{peak_end}]: "
+                      f"g1_for_column_diff={g1_for_column_diff:.2f}%, column_diff={column_diff:.2f}, "
+                      f"阈值: G1>99.00%, column_diff>{column_diff_threshold}, "
+                      f"当前color={color}, column_diff_enabled={column_diff_enabled}")
+                logging.debug(msg)
+                print(msg)
+
+                # 检查是否满足覆盖条件：G1 > 99 并且 列灰度差值大于阈值（只对红色波峰生效）
+                logging.debug(f"[DEBUG] 列灰度差值覆盖条件检查: column_diff_enabled={column_diff_enabled}, color={color}")
+                if column_diff_enabled and color == "red":
+                    logging.debug(f"[DEBUG] 满足前置条件，检查数值: g1_for_column_diff={g1_for_column_diff:.2f} > 99.0? {g1_for_column_diff > 99.0}, column_diff={column_diff:.2f} > {column_diff_threshold}? {column_diff > column_diff_threshold}")
+                    if g1_for_column_diff > 99.0 and column_diff > column_diff_threshold:
+                        color = "green"
+                        column_diff_override_applied = True
+
+                        # 获取当前帧索引
+                        buffer_start_frame_index = config.get('buffer_start_frame_index', 0)
+                        absolute_frame_idx = buffer_start_frame_index + column_diff_override_frame_idx
+
+                        # 输出覆盖日志（包含帧索引）
+                        msg = (f"[列灰度差值覆盖] 帧{absolute_frame_idx} 波峰[{peak_start}-{peak_end}] RED→GREEN: "
+                              f"G1={g1_for_column_diff:.2f}%, 列灰度差值={column_diff:.2f} "
+                              f"(条件: G1>99.00% 且 列灰度差值>{column_diff_threshold})")
+                        logging.info(msg)
+                        print(msg)
+                    else:
+                        logging.debug(f"[DEBUG] 列灰度差值覆盖条件未满足，不执行覆盖")
+                else:
+                    logging.debug(f"[DEBUG] 列灰度差值覆盖跳过: column_diff_enabled={column_diff_enabled}, color={color}")
+
 
 
         # 计算置信度
@@ -905,12 +1123,23 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                 'quality_score': quality_info.get('quality_score', 0.0),
                 'variance': variance_val,
                 'data_range': quality_info.get('data_range', 0.0),
-                'error': f'ROI2无效: mean={mean_val:.2f} (min={roi2_min_gray:.2f}, max={roi2_max_gray:.2f}), variance={variance_val:.4f} (min={float(min_variance):.4f})'
+                'roi2_frames_count': roi2_interval_length,
+                'error': f'ROI2无效: mean={mean_val:.2f} (min={roi2_min_gray:.2f}, max={roi2_max_gray:.2f}), variance={variance_val:.4f} (min={float(min_variance):.4f})',
+                # G1/G2字段（默认值）
+                'g1_g2_override_applied': False,
+                'g1_value': None,
+                'g2_value': None,
+                'g1_g2_override_frame_idx': None,
+                # 列灰度差值字段（默认值）
+                'column_diff_override_applied': False,
+                'column_diff_value': None,
+                'column_diff_override_frame_idx': None,
             }
 
         return {
             'color': color,
-            'method': 'roi2' if not g1_g2_override_applied else 'g1_g2_override',
+            'method': 'roi2' if not (g1_g2_override_applied or column_diff_override_applied) else
+                      ('g1_g2_override' if g1_g2_override_applied else 'column_diff_override'),
             'frame_difference': frame_difference,
             'threshold': color_threshold,
             'pre_avg': pre_avg,
@@ -920,10 +1149,15 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
             'quality_score': quality_info['quality_score'],
             'variance': quality_info.get('variance', 0.0),
             'data_range': quality_info.get('data_range', 0.0),
-            # 新增G1/G2字段
+            # G1/G2字段
             'g1_g2_override_applied': g1_g2_override_applied,
             'g1_value': g1_value_used,
             'g2_value': g2_value_used,
+            'g1_g2_override_frame_idx': g1_g2_override_frame_idx,  # 新增：覆盖帧索引
+            # 列灰度差值字段（新增）
+            'column_diff_override_applied': column_diff_override_applied,
+            'column_diff_value': column_diff_used,
+            'column_diff_override_frame_idx': column_diff_override_frame_idx,  # 新增：覆盖帧索引
         }
 
     except Exception as e:
@@ -935,10 +1169,17 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                 'frame_difference': 0.0,
                 'roi2_valid': False,
                 'error': f'ROI2计算错误({str(e)})，回退到ROI1',
-                # 新增G1/G2字段（默认值）
+                'roi2_variance': 0.0,
+                'roi2_frames_count': 0,
+                # G1/G2字段（默认值）
                 'g1_g2_override_applied': False,
                 'g1_value': None,
                 'g2_value': None,
+                'g1_g2_override_frame_idx': None,
+                # 列灰度差值字段（默认值）
+                'column_diff_override_applied': False,
+                'column_diff_value': None,
+                'column_diff_override_frame_idx': None,
             }
         else:
             return {
@@ -947,7 +1188,18 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                 'confidence': 0.0,
                 'frame_difference': 0.0,
                 'roi2_valid': False,
-                'error': f'ROI2计算错误且未启用回退: {str(e)}'
+                'error': f'ROI2计算错误且未启用回退: {str(e)}',
+                'roi2_variance': 0.0,
+                'roi2_frames_count': 0,
+                # G1/G2字段（默认值）
+                'g1_g2_override_applied': False,
+                'g1_value': None,
+                'g2_value': None,
+                'g1_g2_override_frame_idx': None,
+                # 列灰度差值字段（默认值）
+                'column_diff_override_applied': False,
+                'column_diff_value': None,
+                'column_diff_override_frame_idx': None,
             }
 
 
@@ -1077,6 +1329,57 @@ def compute_roi2_region(
     return x1, y1, x2, y2
 
 
+def setup_logging():
+    """配置日志系统，输出到控制台和文件"""
+    base_dir = _get_base_dir()
+    log_dir = os.path.join(base_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    # 创建日志文件名（包含时间戳）
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"simple_roi_daemon_{timestamp}.log")
+
+    # 配置根日志记录器
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+
+    # 清除现有的处理器
+    logger.handlers.clear()
+
+    # 创建格式化器
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # 文件处理器（记录所有级别）
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # 控制台处理器（只记录INFO及以上级别）
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # 过滤第三方库的DEBUG日志（减少噪音）
+    # PIL/Pillow 图片库
+    logging.getLogger('PIL').setLevel(logging.WARNING)
+    logging.getLogger('PIL.PngImagePlugin').setLevel(logging.WARNING)
+    logging.getLogger('PIL.Image').setLevel(logging.WARNING)
+    # OpenCV
+    logging.getLogger('cv2').setLevel(logging.WARNING)
+    # Matplotlib
+    logging.getLogger('matplotlib').setLevel(logging.WARNING)
+    # NumPy
+    logging.getLogger('numpy').setLevel(logging.WARNING)
+
+    logging.info(f"日志系统已启动，日志文件: {log_file}")
+    return log_file
+
+
 def cleanup_directories():
     """根据配置文件清理指定文件夹下的所有内容"""
     try:
@@ -1085,7 +1388,7 @@ def cleanup_directories():
 
         # 检查是否启用清理功能
         if not cleanup_config.get("enabled", True):
-            print("启动时清理功能已禁用（配置文件中 startup_cleanup.enabled = false）")
+            logging.info("启动时清理功能已禁用（配置文件中 startup_cleanup.enabled = false）")
             return
 
         # 获取要清理的目录列表
@@ -1101,12 +1404,12 @@ def cleanup_directories():
         base_dir = _get_base_dir()
         cleaned_count = 0
 
-        print("开始启动时清理...")
+        logging.info("开始启动时清理...")
 
         for dir_name in directories_to_clean:
             # 检查该目录是否被标记为可清理
             if dir_name not in cleanup_switches or not cleanup_switches[dir_name]:
-                print(f"跳过目录 {dir_name}（配置文件中已禁用）")
+                logging.info(f"跳过目录 {dir_name}（配置文件中已禁用）")
                 continue
 
             dir_path = os.path.join(base_dir, dir_name)
@@ -1116,10 +1419,10 @@ def cleanup_directories():
                     # 统计要删除的项目
                     items_to_delete = os.listdir(dir_path)
                     if not items_to_delete:
-                        print(f"  目录 {dir_name} 为空，无需清理")
+                        logging.info(f"  目录 {dir_name} 为空，无需清理")
                         continue
 
-                    print(f"清理文件夹: {dir_path}（包含 {len(items_to_delete)} 个项目）")
+                    logging.info(f"清理文件夹: {dir_path}（包含 {len(items_to_delete)} 个项目）")
 
                     # 遍历文件夹并删除所有文件和子文件夹
                     deleted_files = 0
@@ -1129,33 +1432,33 @@ def cleanup_directories():
                         try:
                             if os.path.isfile(item_path):
                                 os.remove(item_path)
-                                print(f"  删除文件: {item_name}")
+                                logging.debug(f"  删除文件: {item_name}")
                                 deleted_files += 1
                             elif os.path.isdir(item_path):
                                 import shutil
                                 shutil.rmtree(item_path)
-                                print(f"  删除文件夹: {item_name}")
+                                logging.debug(f"  删除文件夹: {item_name}")
                                 deleted_dirs += 1
                         except Exception as item_error:
-                            print(f"  删除失败 {item_name}: {item_error}")
+                            logging.warning(f"  删除失败 {item_name}: {item_error}")
 
-                    print(f"  清理完成: {dir_name}（删除 {deleted_files} 个文件，{deleted_dirs} 个文件夹）")
+                    logging.info(f"  清理完成: {dir_name}（删除 {deleted_files} 个文件，{deleted_dirs} 个文件夹）")
                     cleaned_count += 1
 
                 except Exception as e:
-                    print(f"  清理文件夹失败: {e}")
+                    logging.error(f"  清理文件夹失败: {e}")
             else:
-                print(f"  文件夹不存在，跳过: {dir_name}")
+                logging.info(f"  文件夹不存在，跳过: {dir_name}")
 
         if cleaned_count == 0:
-            print("没有需要清理的目录或所有目录都为空")
+            logging.info("没有需要清理的目录或所有目录都为空")
         else:
-            print(f"清理完成：共清理了 {cleaned_count} 个目录")
+            logging.info(f"清理完成：共清理了 {cleaned_count} 个目录")
 
     except Exception as e:
-        print(f"读取清理配置时发生错误: {e}")
+        logging.error(f"读取清理配置时发生错误: {e}")
         # 如果配置读取失败，使用默认行为（不清理）
-        print("由于配置读取失败，跳过启动时清理")
+        logging.info("由于配置读取失败，跳过启动时清理")
 
 
 def run_daemon() -> None:
@@ -1167,6 +1470,9 @@ def run_daemon() -> None:
       - update gray buffer and run peak detection
       - log results at configured frame_rate
     """
+    # 配置日志系统（在清理之前，以便记录清理过程）
+    log_file = setup_logging()
+    logging.info("SimpleFEM ROI Daemon 启动...")
     print("SimpleFEM ROI Daemon 启动...")
 
     # 清理现有的数据文件夹
@@ -1401,6 +1707,7 @@ def run_daemon() -> None:
         roi3_80_160_buffer: Deque[float] = deque(maxlen=100)
         roi3_g1_buffer: Deque[float] = deque(maxlen=100)  # G1值缓冲区
         roi3_g2_buffer: Deque[float] = deque(maxlen=100)  # G2值缓冲区
+        roi3_column_diff_buffer: Deque[float] = deque(maxlen=100)  # ROI3列灰度差值缓冲区
 
         # Initialize ROI1 threshold used so hybrid detection can reference it
         # before the per-frame ROI1 adaptive-threshold block runs.
@@ -1594,6 +1901,7 @@ def run_daemon() -> None:
                                 roi3_80_160_buffer.clear()
                                 roi3_g1_buffer.clear()  # 清空G1缓冲区
                                 roi3_g2_buffer.clear()  # 清空G2缓冲区
+                                roi3_column_diff_buffer.clear()  # 清空列灰度差值缓冲区
                                 reset_values = reset_video_state_variables(gray_buffer)
                                 (bg_count, bg_mean, last_intersection_roi, frames_since_protection_end,
                                  threshold_protection_active, protection_end_time, consecutive_below_threshold,
@@ -1688,14 +1996,30 @@ def run_daemon() -> None:
                             # 所有视频都处理完毕
                             total_time = time.time() - (loop_start - (frame_index * interval_seconds))
                             actual_fps = frame_index / total_time if total_time > 0 else 0
-                            print(f"\n" + "="*50)
-                            print(f"所有视频处理完成！")
-                            print(f"[统计] 总处理时间: {total_time:.2f} 秒")
-                            print(f"[统计] 总处理视频数: {len(video_files)}")
-                            print(f"[统计] 总处理帧数: {frame_index}")
-                            print(f"[统计] 平均帧率: {actual_fps:.2f} fps")
-                            print(f"[统计] 配置帧率: {roi_frame_rate:.2f} fps")
-                            print("="*50)
+                            msg = f"\n" + "="*50
+                            print(msg)
+                            logging.info(msg)
+                            msg = f"所有视频处理完成！"
+                            print(msg)
+                            logging.info(msg)
+                            msg = f"[统计] 总处理时间: {total_time:.2f} 秒"
+                            print(msg)
+                            logging.info(msg)
+                            msg = f"[统计] 总处理视频数: {len(video_files)}"
+                            print(msg)
+                            logging.info(msg)
+                            msg = f"[统计] 总处理帧数: {frame_index}"
+                            print(msg)
+                            logging.info(msg)
+                            msg = f"[统计] 平均帧率: {actual_fps:.2f} fps"
+                            print(msg)
+                            logging.info(msg)
+                            msg = f"[统计] 配置帧率: {roi_frame_rate:.2f} fps"
+                            print(msg)
+                            logging.info(msg)
+                            msg = "="*50
+                            print(msg)
+                            logging.info(msg)
                             break
                     screen_width, screen_height = screen.size
                 else:
@@ -1800,7 +2124,16 @@ def run_daemon() -> None:
                             roi3_g2 = g2  # Save for cache recording
                             roi3_g1_buffer.append(g1)  # 存入G1缓冲区
                             roi3_g2_buffer.append(g2)  # 存入G2缓冲区
-                            print(f"[STAT] G1(80-255)={g1:.2f}%, G2(150-255)={g2:.2f}%")
+                            msg = f"[STAT] 帧{frame_index} G1(80-255)={g1:.2f}%, G2(150-255)={g2:.2f}%"
+                            logging.debug(msg)
+                            print(msg)
+
+                            # 计算ROI3列灰度差值
+                            roi3_column_diff = compute_roi3_column_mean_diff(roi3_image)
+                            roi3_column_diff_buffer.append(roi3_column_diff)
+                            msg = f"[STAT] 帧{frame_index} ROI3列灰度差值: {roi3_column_diff:.2f}"
+                            logging.debug(msg)
+                            print(msg)
                         else:
                             print(f"[DEBUG] ROI3 extraction failed: frame={frame_index}, intersection={intersection}, roi3_extension_params={roi3_extension_params}")
                     else:
@@ -1847,6 +2180,7 @@ def run_daemon() -> None:
                                 current_threshold=threshold_used,
                                 has_peaks=False,  # Will check again after detection
                                 frame_time=current_time,
+                                frame_index=frame_index,
                                 protection_active=threshold_protection_active,
                                 protection_end_time=protection_end_time,
                                 consecutive_below=consecutive_below_threshold,
@@ -1911,7 +2245,7 @@ def run_daemon() -> None:
                             }
                         }
 
-                        print(f"[混合检测] 开始分析 - ROI1曲线长度:{len(roi1_curve)}, ROI2曲线长度:{len(roi2_curve)}")
+                        logging.info(f"[混合检测] 帧{frame_index} 开始分析 - ROI1曲线长度:{len(roi1_curve)}, ROI2曲线长度:{len(roi2_curve)}")
 
                         # 执行混合检测（传递ROI1波峰管理参数）
                         try:
@@ -1920,6 +2254,8 @@ def run_daemon() -> None:
                             # 新增：传递G1/G2曲线
                             hybrid_config_with_frame["roi3_g1_curve"] = list(roi3_g1_buffer) if roi3_g1_buffer else []
                             hybrid_config_with_frame["roi3_g2_curve"] = list(roi3_g2_buffer) if roi3_g2_buffer else []
+                            # 传递列灰度差值曲线（新增）
+                            hybrid_config_with_frame["roi3_column_diff_curve"] = list(roi3_column_diff_buffer) if roi3_column_diff_buffer else []
 
                             hybrid_peaks = hybrid_peak_detection(
                                 roi1_curve, roi2_curve, hybrid_config_with_frame,
@@ -1941,7 +2277,7 @@ def run_daemon() -> None:
                             red_count = len(red_peaks)
                             avg_quality = sum(peak.get('quality_score', 0) for peak in hybrid_peaks) / len(hybrid_peaks) if hybrid_peaks else 0
 
-                            print(f"[混合检测] 结果统计: 绿色{green_count}个, 红色{red_count}个, 平均质量{avg_quality:.2f}")
+                            logging.info(f"[混合检测] 帧{frame_index} 结果统计: 绿色{green_count}个, 红色{red_count}个, 平均质量{avg_quality:.2f}")
 
                             # 详细日志输出
                             for i, peak in enumerate(hybrid_peaks[:5]):  # 只显示前5个
@@ -1950,10 +2286,10 @@ def run_daemon() -> None:
                                 method = peak['method']
                                 color = peak['color']
                                 confidence = peak.get('confidence', 0)
-                                print(f"  波峰{i+1}: [{start}-{end}] {width}帧, {color}色, 方法:{method}, 置信度:{confidence:.2f}")
+                                logging.info(f"  帧{frame_index} 波峰{i+1}: [{start}-{end}] {width}帧, {color}色, 方法:{method}, 置信度:{confidence:.2f}")
 
                         except Exception as e:
-                            print(f"[混合检测] 执行失败: {e}")
+                            logging.error(f"[混合检测] 帧{frame_index} 执行失败: {e}")
                             # 回退到传统ROI2检测
                             hybrid_peaks = []
                             green_peaks, red_peaks = [], []
@@ -1962,7 +2298,7 @@ def run_daemon() -> None:
                     else:
                         # 保持原有的ROI2独立检测逻辑作为后备
                         if hybrid_enabled:
-                            print(f"[传统检测] 混合检测未启用或数据不足，使用ROI2独立检测模式")
+                            logging.info(f"[传统检测] 帧{frame_index} 混合检测未启用或数据不足，使用ROI2独立检测模式")
 
                         if hybrid_enabled and roi1_enabled:
                             if frame_index % 50 == 0:
@@ -2009,6 +2345,7 @@ def run_daemon() -> None:
                             current_threshold=threshold_used,
                             has_peaks=has_peaks,
                             frame_time=current_time,
+                            frame_index=frame_index,
                             protection_active=threshold_protection_active,
                             protection_end_time=protection_end_time,
                             consecutive_below=consecutive_below_threshold,
@@ -2158,6 +2495,7 @@ def run_daemon() -> None:
                                 "g1": float(roi3_g1) if roi3_g1 is not None else None,
                                 "g2": float(roi3_g2) if roi3_g2 is not None else None,
                                 "gray": float(roi3_gray) if roi3_gray is not None else None,
+                                "column_diff": float(roi3_column_diff) if roi3_column_diff is not None else None,
                             },
                             "buffer": {
                                 "len": int(buffer_len),
@@ -2515,33 +2853,55 @@ if __name__ == "__main__":
         run_daemon()
     except KeyboardInterrupt:
         # 程序结束时导出最终CSV文件（task要求）
-        print("\n数据处理完成，CSV文件已保存...")
+        msg = "\n数据处理完成，CSV文件已保存..."
+        print(msg)
+        logging.info(msg)
         try:
             # 获取当前统计文件路径
             current_stats = statistics_manager.current_statistics
             if current_stats:
                 export_path = current_stats.export_final_csv()
                 if export_path:
-                    print(f"✅ 当前视频CSV文件已保存至: {export_path}")
+                    msg = f"✅ 当前视频CSV文件已保存至: {export_path}"
+                    print(msg)
+                    logging.info(msg)
 
             # 显示所有视频的统计摘要
             global_summary = statistics_manager.get_global_summary()
-            print(f"📊 批量处理统计摘要:")
-            print(f"   总处理视频数: {global_summary.get('total_videos_processed', 0)}")
-            print(f"   总波峰数: {global_summary.get('total_peaks', 0)}")
-            print(f"   绿色波峰: {global_summary.get('total_green_peaks', 0)}")
-            print(f"   红色波峰: {global_summary.get('total_red_peaks', 0)}")
-            print(f"   会话时长: {global_summary.get('session_duration', 'N/A')}")
+            msg = f"📊 批量处理统计摘要:"
+            print(msg)
+            logging.info(msg)
+            msg = f"   总处理视频数: {global_summary.get('total_videos_processed', 0)}"
+            print(msg)
+            logging.info(msg)
+            msg = f"   总波峰数: {global_summary.get('total_peaks', 0)}"
+            print(msg)
+            logging.info(msg)
+            msg = f"   绿色波峰: {global_summary.get('total_green_peaks', 0)}"
+            print(msg)
+            logging.info(msg)
+            msg = f"   红色波峰: {global_summary.get('total_red_peaks', 0)}"
+            print(msg)
+            logging.info(msg)
+            msg = f"   会话时长: {global_summary.get('session_duration', 'N/A')}"
+            print(msg)
+            logging.info(msg)
 
             # 显示每个视频的详细信息
             videos_processed = global_summary.get('videos_processed', [])
             if videos_processed:
-                print(f"   处理的视频: {', '.join(videos_processed)}")
+                msg = f"   处理的视频: {', '.join(videos_processed)}"
+                print(msg)
+                logging.info(msg)
 
         except Exception as e:
-            print(f"❌ 处理CSV文件时发生错误: {e}")
+            msg = f"❌ 处理CSV文件时发生错误: {e}"
+            print(msg)
+            logging.error(msg)
 
-        print("守护进程已停止")
+        msg = "守护进程已停止"
+        print(msg)
+        logging.info(msg)
     except Exception as e:
         print(f"❌ 守护进程运行时发生错误: {e}")
         # 即使出错也尝试保存数据
