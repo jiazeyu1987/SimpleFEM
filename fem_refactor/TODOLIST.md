@@ -35,8 +35,8 @@
 - video 模式切换视频/循环、帧步长采样行为一致；screen 模式频率一致。
 
 ### 4) 交点与防抖（中风险）
-- [ ] `anti_jitter_manager.py`：构建滤波器实例（ema/threshold）
-- [ ] `intersection_manager.py`：每帧 `detect_green_intersection`、失败回退、last_intersection 管理
+- [x] `anti_jitter_manager.py`：构建滤波器实例（ema/threshold）
+- [x] `intersection_manager.py`：每帧 `detect_green_intersection`、失败回退、last_intersection 管理
 
 验收：
 - `roi_analysis_cache` 中 `intersection.current/used` 行为一致（特别是失败回退路径）。
@@ -78,4 +78,3 @@
 - [ ] 每拆完一个模块，重跑并对比：
   - cache 中关键字段（intersection/threshold/peaks）
   - CSV 行数与关键字段（frame_index、peak_type、threshold_used 等）
-

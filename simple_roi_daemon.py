@@ -24,12 +24,13 @@ from datetime import datetime
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
-from PIL import Image, ImageGrab
+from PIL import Image
 import cv2
 import matplotlib.pyplot as plt
 import glob
 
 from fem_refactor.analysis_cache import RoiAnalysisCache
+from fem_refactor.anti_jitter_manager import AntiJitterManager
 from fem_refactor.cleanup_manager import cleanup_directories
 from fem_refactor.config_loader import load_fem_config
 from fem_refactor.image_metrics import (
@@ -40,7 +41,16 @@ from fem_refactor.image_metrics import (
 )
 from fem_refactor.logging_manager import setup_logging, setup_peak_logger
 from fem_refactor.paths import get_base_dir
+from fem_refactor.processing_mode_manager import initialize_processing_mode
 from fem_refactor.roi_math import adjust_roi1_to_screen, compute_roi2_region
+from fem_refactor.screen_source import capture_screen
+from fem_refactor.intersection_manager import IntersectionManager
+from fem_refactor.video_source import (
+    discover_video_files,
+    get_video_fps,
+    get_video_frame,
+    initialize_video_capture,
+)
 
 
 
@@ -203,7 +213,6 @@ def _setup_import_paths() -> None:
 _setup_import_paths()
 
 from peak_detection import detect_peaks  # type: ignore  # noqa: E402
-from green_detector import detect_green_intersection, IntersectionFilter  # type: ignore  # noqa: E402
 from safe_peak_statistics import SafePeakStatistics  # type: ignore  # noqa: E402
 
 
@@ -313,84 +322,6 @@ def _create_video_folders(video_path: str, session_id: str, processing_mode: str
         os.makedirs(wave1_dir, exist_ok=True)
 
     return tmp_root
-
-
-def discover_video_files(video_path: str) -> List[str]:
-    """发现文件夹中的所有视频文件"""
-    if not os.path.exists(video_path):
-        raise ValueError(f"Video directory does not exist: {video_path}")
-
-    # 支持的视频文件扩展名
-    video_extensions = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv', '*.flv', '*.webm']
-
-    video_files = []
-    for ext in video_extensions:
-        # 搜索文件夹中的匹配文件
-        pattern = os.path.join(video_path, ext)
-        video_files.extend(glob.glob(pattern))
-        # 也搜索大写扩展名
-        pattern = os.path.join(video_path, ext.upper())
-        video_files.extend(glob.glob(pattern))
-
-    # 去重并排序
-    video_files = sorted(list(set(video_files)))
-
-    if not video_files:
-        raise ValueError(f"No video files found in directory: {video_path}")
-
-    return video_files
-
-
-def initialize_video_capture(video_path: str):
-    """初始化视频捕获器"""
-    video_cap = cv2.VideoCapture(video_path)
-    if not video_cap.isOpened():
-        raise ValueError(f"Cannot open video file: {video_path}")
-    video_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 减少缓冲
-    return video_cap
-
-
-def _get_video_fps(video_cap, default_fps: float = 30.0) -> float:
-    try:
-        fps = float(video_cap.get(cv2.CAP_PROP_FPS))
-    except Exception:
-        fps = 0.0
-    if not fps or fps <= 0:
-        return float(default_fps)
-    return float(fps)
-
-
-def get_video_frame(video_cap, loop_enabled: bool = False, frame_step: int = 1):
-    """
-    从视频获取帧，返回PIL图像或None。
-
-    frame_step>1 时，会在视频时间轴上“跳帧取样”：每次返回 1 帧，并将读取位置前进约 frame_step 帧。
-    这让 roi_capture.frame_rate 在 video 模式下真正对应“每秒采样多少帧”，而不是仅仅降低处理速度。
-    """
-    if frame_step is None:
-        frame_step = 1
-    try:
-        frame_step = int(frame_step)
-    except Exception:
-        frame_step = 1
-    frame_step = max(1, frame_step)
-
-    frame = None
-    for _ in range(frame_step):
-        ret, frame = video_cap.read()
-        if ret:
-            continue
-        if not loop_enabled:
-            return None
-        video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        ret, frame = video_cap.read()
-        if not ret:
-            return None
-
-    if frame is None:
-        return None
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(rgb_frame)
 
 
 def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
@@ -1017,57 +948,7 @@ def run_daemon() -> None:
 
     config = load_fem_config()
 
-    # Initialize anti-jitter filter if enabled
-    anti_jitter_config = config.get("roi2_anti_jitter", {})
-    intersection_filter = None
-    if anti_jitter_config.get("enabled", False):
-        # 参数验证和标准化
-        try:
-            algorithm = anti_jitter_config.get("algorithm", "ema")
-            movement_threshold = float(anti_jitter_config.get("movement_threshold", 20.0))
-            initialization_frames = int(anti_jitter_config.get("initialization_frames", 3))
-
-            if algorithm == "threshold":
-                # 阈值式防抖动
-                from threshold_based_anti_jitter import ThresholdIntersectionFilter
-                intersection_filter = ThresholdIntersectionFilter(movement_threshold, initialization_frames)
-                print(f"ROI2阈值式防抖动已启用:")
-                print(f"  - algorithm: threshold (阈值式)")
-                print(f"  - movement_threshold: {movement_threshold}px (小于此值ROI2完全不动)")
-                print(f"  - initialization_frames: {initialization_frames} (前N帧初始化稳定位置)")
-                print(f"  - 策略: 小于{movement_threshold}px变化时ROI2完全静止，超过才更新")
-            else:
-                # EMA平滑式防抖动
-                ema_config = anti_jitter_config.get("ema", {})
-                alpha = float(ema_config.get("alpha", 0.25))
-                stability_threshold = float(anti_jitter_config.get("stability_threshold", 8.0))
-
-                # 参数范围验证
-                if not (0.05 <= alpha <= 0.95):
-                    print(f"Warning: alpha={alpha} 超出推荐范围[0.05, 0.95]，将自动调整")
-                if movement_threshold < 1.0:
-                    print(f"Warning: movement_threshold={movement_threshold} 过小，建议设置为1.0以上")
-                if stability_threshold < 1.0:
-                    print(f"Warning: stability_threshold={stability_threshold} 过小，建议设置为1.0以上")
-                if not (stability_threshold < movement_threshold):
-                    print(f"Warning: stability_threshold({stability_threshold}) 应该小于 movement_threshold({movement_threshold})")
-                if initialization_frames < 1 or initialization_frames > 20:
-                    print(f"Warning: initialization_frames={initialization_frames} 可能不合适，推荐范围[1, 20]")
-
-                intersection_filter = IntersectionFilter(alpha, movement_threshold, initialization_frames, stability_threshold)
-                print(f"ROI2平滑式防抖动已启用:")
-                print(f"  - algorithm: ema (指数移动平均平滑)")
-                print(f"  - alpha (平滑因子): {alpha} (值越小越平滑)")
-                print(f"  - movement_threshold (运动阈值): {movement_threshold}px (大于此值直接通过)")
-                print(f"  - stability_threshold (稳定阈值): {stability_threshold}px (小于此值强力平滑)")
-                print(f"  - initialization_frames (初始化帧数): {initialization_frames}")
-
-        except (ValueError, TypeError) as e:
-            print(f"Error: 防抖动配置参数无效: {e}")
-            print("使用默认参数启用EMA防抖动")
-            intersection_filter = IntersectionFilter()  # 使用默认参数
-    else:
-        print("ROI2防抖动已禁用")
+    anti_jitter_config, intersection_filter = AntiJitterManager().build(config)
 
     # Optional: write a per-frame cache for later analysis / root-cause debugging
     analysis_cache_conf = config.get("analysis_cache", {})
@@ -1079,43 +960,9 @@ def run_daemon() -> None:
         flush_every=int(analysis_cache_conf.get("flush_every", 50)),
     )
 
-    # 检测处理模式
-    processing_mode = config.get("processing_mode", "screen")
-    video_cap = None
-    video_files = []  # 存储要处理的视频文件列表
-    current_video_index = 0  # 当前处理的视频索引
-
-    # 为屏幕模式初始化统计实例
-    if processing_mode == "screen":
-        statistics_manager.initialize_for_video(None, is_batch=False)
-        safe_statistics = statistics_manager.current_statistics
-
-    if processing_mode == "video":
-        video_config = config.get("video_processing", {})
-        video_path = video_config.get("video_path", "")
-        if not video_path:
-            raise ValueError("Video mode enabled but no video_path specified in config")
-
-        # 检查是单个文件还是文件夹
-        if os.path.isfile(video_path):
-            # 单个视频文件
-            video_files = [video_path]
-            print(f"视频模式: 单个视频文件 {video_path}")
-        elif os.path.isdir(video_path):
-            # 视频文件夹
-            video_files = discover_video_files(video_path)
-            print(f"视频模式: 文件夹 {video_path}")
-            print(f"发现 {len(video_files)} 个视频文件:")
-            for i, video_file in enumerate(video_files, 1):
-                print(f"  {i}. {os.path.basename(video_file)}")
-        else:
-            raise ValueError(f"Video path does not exist: {video_path}")
-
-        # 初始化第一个视频
-        if video_files:
-            # 为第一个视频初始化统计
-            statistics_manager.initialize_for_video(video_files[0], is_batch=True)
-            video_cap = initialize_video_capture(video_files[0])
+    processing_mode, video_cap, video_files, current_video_index, safe_statistics = initialize_processing_mode(
+        config, statistics_manager
+    )
 
     try:
         roi_default = config.get("roi_capture", {}).get("default_config", {})
@@ -1222,6 +1069,7 @@ def run_daemon() -> None:
         bg_count: int = 0
         bg_mean: float = 0.0
         last_intersection_roi: Optional[Tuple[int, int]] = None
+        intersection_manager = IntersectionManager()
         frames_since_protection_end: int = 0
 
         # Threshold protection state management
@@ -1324,7 +1172,7 @@ def run_daemon() -> None:
         first_video_frame = True
         effective_frame_rate = roi_frame_rate
         if processing_mode == "video" and video_cap is not None:
-            video_fps = _get_video_fps(video_cap)
+            video_fps = get_video_fps(video_cap)
             if video_fps > 0:
                 effective_frame_rate = min(roi_frame_rate, video_fps)
                 if effective_frame_rate > 0:
@@ -1466,7 +1314,7 @@ def run_daemon() -> None:
                                 print(f"统计会话: {current_stats.session_id}")
 
                                 # 重新计算新视频的帧率参数
-                                video_fps = _get_video_fps(video_cap)
+                                video_fps = get_video_fps(video_cap)
                                 if video_fps > 0:
                                     effective_frame_rate = min(roi_frame_rate, video_fps)
                                     if effective_frame_rate > 0:
@@ -1560,7 +1408,7 @@ def run_daemon() -> None:
                             break
                     screen_width, screen_height = screen.size
                 else:
-                    screen = ImageGrab.grab()
+                    screen = capture_screen()
                     screen_width, screen_height = screen.size
 
                 video_seconds: Optional[float] = None
@@ -1585,37 +1433,12 @@ def run_daemon() -> None:
                 roi3_g2: Optional[float] = None
 
                 # 3. Detect green line intersection in ROI1
-                roi_cv_image = cv2.cvtColor(
-                    np.array(roi1_image),
-                    cv2.COLOR_RGB2BGR,
+                intersection, (center_x, center_y) = intersection_manager.detect_and_get_center(
+                    roi1_image=roi1_image,
+                    anti_jitter_config=anti_jitter_config,
+                    intersection_filter=intersection_filter,
                 )
-                try:
-                    intersection = detect_green_intersection(
-                        roi_cv_image,
-                        anti_jitter_config,
-                        intersection_filter
-                    )
-                except Exception as e:
-                    # Keep daemon running even if detection fails on this frame
-                    print(f"Warning: Green intersection detection failed: {e}")
-                    intersection = None
-                    # 如果检测失败，尝试重置防抖动滤波器
-                    if intersection_filter:
-                        try:
-                            intersection_filter.reset()
-                            intersection_filter.set_image_bounds(roi1_width, roi1_height)
-                        except:
-                            pass
-
-                if intersection is not None:
-                    last_intersection_roi = intersection
-
-                # Fallback for very first frames: use ROI1 center if we never had a hit
-                if last_intersection_roi is not None:
-                    center_x, center_y = last_intersection_roi
-                else:
-                    center_x = roi1_width // 2
-                    center_y = roi1_height // 2
+                last_intersection_roi = intersection_manager.last_intersection_roi
 
                 # 4. Compute ROI2 region and crop
                 roi2_region = compute_roi2_region(
