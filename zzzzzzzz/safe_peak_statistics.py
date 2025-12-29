@@ -1,0 +1,966 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+SimpleFEM 安全波峰统计模块
+实现波峰去重、差值分析和Excel数据收集功能
+根据 task/info1.txt 要求实现
+"""
+
+import csv
+import os
+import sys
+import json
+import threading
+import time
+import shutil
+from datetime import datetime
+from typing import List, Dict, Optional, Tuple, Any
+from collections import deque
+import logging
+
+
+def _get_base_dir() -> str:
+    """获取基础目录，支持源码和打包模式"""
+    if getattr(sys, "frozen", False) and hasattr(sys, "executable"):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = _get_base_dir()
+
+
+class SafePeakStatistics:
+    """安全的波峰统计管理类"""
+
+    def __init__(self, video_name: Optional[str] = None, is_batch_mode: bool = False):
+        self.lock = threading.Lock()
+        self.recent_peaks: List[Dict[str, Any]] = []
+        self.max_recent_peaks = 5  # 去重检查窗口
+        self.stats_data: List[Dict[str, Any]] = []
+
+        # 混合检测相关数据结构
+        self.hybrid_stats_data: List[Dict[str, Any]] = []
+        self.hybrid_enabled: bool = False
+
+        # ROI1波峰唯一ID管理机制
+        self.processed_roi1_peak_ids: set = set()  # 已处理的ROI1波峰ID集合
+
+        self.start_time = datetime.now()
+        self.video_name = video_name
+        self.is_batch_mode = is_batch_mode
+
+        # 会话ID策略
+        if is_batch_mode and video_name:
+            # 批量模式：使用视频名称 + 时间戳
+            sanitized_name = self._sanitize_filename(video_name)
+            self.session_id = f"{sanitized_name}_{self.start_time.strftime('%Y%m%d_%H%M%S')}"
+        else:
+            # 单视频或屏幕模式：原有行为
+            self.session_id = self.start_time.strftime("%Y%m%d_%H%M%S")
+
+        # 文件路径 - 统一保存到export文件夹
+        export_dir = os.path.join(BASE_DIR, "export")
+        os.makedirs(export_dir, exist_ok=True)
+
+        self.csv_filename = f"peak_statistics_{self.session_id}.csv"
+        self.csv_path = os.path.join(export_dir, self.csv_filename)
+
+        # 配置参数（根据task要求）
+        self.duplicate_check_window = 5  # 检查最近5个波峰
+        self.height_tolerance = 0.1      # 高度容差≤0.1
+        self.update_count = 0
+
+        # 新增：连续同色波峰去重配置
+        self.consecutive_frame_window = 10  # 连续检查窗口（10帧）
+        self.consecutive_deduplication_enabled = True  # 是否启用连续同色去重
+        self.cross_color_deduplication_enabled = True  # 是否启用跨颜色去重
+        self.color_priority = {'green': 2, 'red': 1}  # 默认颜色优先级
+        self.consecutive_peak_groups: Dict[str, List[Dict[str, Any]]] = {}  # 跟踪连续同色波峰组
+
+        # 从配置文件读取参数
+        try:
+            config_path = os.path.join(BASE_DIR, "simple_fem_config.json")
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    dup_config = config.get("deduplication", {})
+
+                    self.consecutive_frame_window = dup_config.get("consecutive_frame_window", 10)
+                    self.consecutive_deduplication_enabled = dup_config.get("consecutive_deduplication_enabled", True)
+                    self.cross_color_deduplication_enabled = dup_config.get("cross_color_deduplication_enabled", True)
+
+                    color_priority_config = dup_config.get("color_priority", {})
+                    self.color_priority.update(color_priority_config)
+
+                    self._add_log(f"去重配置读取完成: 窗口={self.consecutive_frame_window}帧, 同色去重={self.consecutive_deduplication_enabled}, 跨颜色去重={self.cross_color_deduplication_enabled}")
+                    self._add_log(f"颜色优先级: {self.color_priority}")
+        except Exception as e:
+            self._add_log(f"读取配置文件失败，使用默认配置: {e}", level="WARNING")
+
+        # 初始化CSV文件（程序开始时记录）
+        self._initialize_csv_file()
+        self._add_log(f"SafePeakStatistics初始化完成，会话ID: {self.session_id}")
+        if self.video_name:
+            self._add_log(f"视频名称: {self.video_name}, 批量模式: {self.is_batch_mode}")
+        self._add_log(f"连续同色去重配置: 窗口={self.consecutive_frame_window}帧, 启用={self.consecutive_deduplication_enabled}")
+
+    def _sanitize_filename(self, filename: str) -> str:
+        """清理视频文件名用于文件夹和文件命名"""
+        import re
+        # 去除文件扩展名
+        name_without_ext = os.path.splitext(filename)[0]
+        # 替换无效字符为下划线
+        sanitized = re.sub(r'[<>:"/\\|?*]', '_', name_without_ext)
+        # 去除开头和结尾的点和下划线，限制长度
+        sanitized = sanitized.strip('._')[:50]
+        # 如果清理后为空，使用默认名称
+        return sanitized or f"video_{int(self.start_time.timestamp())}"
+
+    def _initialize_csv_file(self):
+        """初始化CSV文件，写入表头（程序开始时记录）"""
+        try:
+            # 确保目录存在
+            os.makedirs(BASE_DIR, exist_ok=True)
+
+            file_exists = os.path.exists(self.csv_path)
+
+            with open(self.csv_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
+                # 包含所有必要字段：peak_type, frame_index, 前后X帧平均值, 波峰最大值
+                fieldnames = [
+                    'peak_type',
+                    'frame_index',
+                    'pre_peak_avg',
+                    'post_peak_avg',
+                    'frame_diff',
+                    'difference_threshold_used',
+                    'threshold_used',
+                    'bg_mean',
+                    'peak_max_value',
+                    'roi3_peak_max_value',
+                    'roi3_peak_max_frame',
+                    'pre_peak_frame_start',
+                    'pre_peak_frame_end',
+                    'post_peak_frame_start',
+                    'post_peak_frame_end',
+                ]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+                if not file_exists:
+                    writer.writeheader()
+                    self._add_log(f"CSV文件初始化完成: {self.csv_path}")
+                    self._add_log(f"包含字段: {', '.join(fieldnames)}")
+                else:
+                    self._add_log(f"CSV文件已存在，继续追加数据: {self.csv_path}")
+
+        except Exception as e:
+            self._add_log(f"初始化CSV文件失败: {e}", level="ERROR")
+
+    def add_peaks_from_daemon(self,
+                            frame_index: int,
+                            green_peaks: List[Tuple[int, int]],
+                            red_peaks: List[Tuple[int, int]],
+                            curve: List[float],
+                            intersection: Optional[Tuple[int, int]] = None,
+                            roi2_info: Optional[Dict[str, int]] = None,
+                            gray_value: Optional[float] = None,
+                             difference_threshold: float = 1.1,
+                             pre_post_avg_frames: int = 5,
+                             threshold_used: Optional[float] = None,
+                             bg_mean: Optional[float] = None,
+                             hybrid_enabled: bool = False,
+                             hybrid_peaks: List[Dict] = None,
+                             roi1_curve: List[float] = None,
+                             roi1_threshold_used: float = 0.0,
+                             roi3_curve: Optional[List[float]] = None,
+                             roi3_override_enabled: bool = False,
+                             roi3_override_threshold: float = 115.0) -> List[Dict[str, Any]]:
+        """
+        从守护进程添加波峰数据，支持混合检测模式
+
+        Args:
+            frame_index: 帧索引
+            green_peaks: 绿色波峰列表 [(start_frame, end_frame), ...] - 传统模式使用
+            red_peaks: 红色波峰列表 [(start_frame, end_frame), ...] - 传统模式使用
+            curve: ROI2当前灰度曲线数据
+            intersection: ROI1中的绿线交点坐标 (x, y)
+            roi2_info: ROI2区域信息 {'x1':, 'y1':, 'x2':, 'y2':}
+            gray_value: ROI2的平均灰度值
+            difference_threshold: 用于分类的差值阈值
+            pre_post_avg_frames: 前后平均灰度的帧数（默认5）
+            threshold_used: ROI2当次检测使用的阈值（固定阈值或自适应阈值）
+            bg_mean: ROI2当次检测时的背景均值（用于自适应阈值基线）
+            hybrid_enabled: 是否启用混合检测模式
+            hybrid_peaks: 混合检测结果列表 - 混合模式优先使用
+            roi1_curve: ROI1灰度曲线数据
+            roi1_threshold_used: ROI1检测使用的阈值
+
+        Returns:
+            List[Dict[str, Any]]: 添加的波峰统计数据列表
+        """
+        results: List[Dict[str, Any]] = []
+        try:
+            timestamp = datetime.now()
+
+            with self.lock:
+                # 混合检测模式优先处理
+                if hybrid_enabled and hybrid_peaks:
+                    print(f"[混合检测统计] 处理{len(hybrid_peaks)}个混合检测结果")
+
+                    for hybrid_peak in hybrid_peaks:
+                        peak_start, peak_end = hybrid_peak['peak_interval']
+                        roi1_peak_id = hybrid_peak.get('roi1_peak_id', '')
+
+                        # 第一层去重：ROI1波峰唯一ID检查
+                        if roi1_peak_id and roi1_peak_id in self.processed_roi1_peak_ids:
+                            results.append({
+                                **hybrid_peak,
+                                "action": "skipped",
+                                "skip_reason": "duplicate_roi1_peak_id",
+                                "roi1_peak_id": roi1_peak_id
+                            })
+                            print(f"[统计系统] ROI1波峰ID {roi1_peak_id} 已处理过，跳过")
+                            continue
+
+                        # 创建混合检测波峰数据
+                        hybrid_peak_data = self._create_hybrid_peak_data(
+                            timestamp, peak_start, peak_end, hybrid_peak,
+                            frame_index, curve, roi1_curve, intersection, roi2_info,
+                            gray_value, difference_threshold, pre_post_avg_frames,
+                            threshold_used, roi1_threshold_used, bg_mean,
+                            roi3_curve, roi3_override_enabled, roi3_override_threshold
+                        )
+
+                        # 应用原有的三层去重逻辑
+                        if self._is_duplicate_peak(hybrid_peak_data):
+                            results.append({**hybrid_peak_data, "action": "skipped", "skip_reason": "duplicate_peak"})
+                            continue
+
+                        if self._is_consecutive_duplicate(hybrid_peak_data, curve, peak_start, peak_end):
+                            results.append({**hybrid_peak_data, "action": "skipped", "skip_reason": "consecutive_duplicate"})
+                            continue
+
+                        if self._is_invalid_peak_data(hybrid_peak_data):
+                            results.append({**hybrid_peak_data, "action": "skipped", "skip_reason": "invalid_peak_data"})
+                            continue
+
+                        # 记录已处理的ROI1波峰ID
+                        if roi1_peak_id:
+                            self.processed_roi1_peak_ids.add(roi1_peak_id)
+
+                        # 混合检测数据通过去重验证，记录到统计系统
+                        self._add_peak_to_memory(hybrid_peak_data)
+                        self._write_peak_to_csv(hybrid_peak_data)
+                        results.append({**hybrid_peak_data, "action": "added"})
+
+                        color = hybrid_peak.get('color', 'unknown')
+                        method = hybrid_peak.get('method', 'unknown')
+                        confidence = hybrid_peak.get('confidence', 0.0)
+                        self._add_log(f"添加混合检测{color}色波峰: [{peak_start},{peak_end}], 方法:{method}, 置信度:{confidence:.2f}")
+
+                    return results
+
+                # 传统模式：添加绿色波峰
+                for i, (start, end) in enumerate(green_peaks):
+                    peak_data = self._create_peak_data(
+                        timestamp, frame_index, "green", start, end,
+                        curve, intersection, roi2_info, gray_value,
+                        difference_threshold, pre_post_avg_frames,
+                        threshold_used, bg_mean,
+                        roi3_curve, roi3_override_enabled, roi3_override_threshold
+                    )
+
+                    # 第一层去重：基于前后帧平均值
+                    if self._is_duplicate_peak(peak_data):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "duplicate_peak"})
+                        continue
+
+                    # 第二层去重：连续同色波峰去重
+                    if self._is_consecutive_duplicate(peak_data, curve, start, end):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "consecutive_duplicate"})
+                        continue
+
+                    # 第三层去重：排除前后帧平均值为0的波峰
+                    if self._is_invalid_peak_data(peak_data):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "invalid_peak_data"})
+                        continue
+
+                    # 三层去重都通过，才记录波峰
+                    self._add_peak_to_memory(peak_data)
+                    self._write_peak_to_csv(peak_data)
+                    results.append({**peak_data, "action": "added"})
+                    self._add_log(f"添加绿色波峰: [{start},{end}], 最大值: {peak_data['peak_max_value']:.1f}")
+
+                # 添加红色波峰
+                for i, (start, end) in enumerate(red_peaks):
+                    peak_data = self._create_peak_data(
+                        timestamp, frame_index, "red", start, end,
+                        curve, intersection, roi2_info, gray_value,
+                        difference_threshold, pre_post_avg_frames,
+                        threshold_used, bg_mean,
+                        roi3_curve, roi3_override_enabled, roi3_override_threshold
+                    )
+
+                    # 第一层去重：基于前后帧平均值
+                    if self._is_duplicate_peak(peak_data):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "duplicate_peak"})
+                        continue
+
+                    # 第二层去重：连续同色波峰去重
+                    if self._is_consecutive_duplicate(peak_data, curve, start, end):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "consecutive_duplicate"})
+                        continue
+
+                    # 第三层去重：排除前后帧平均值为0的波峰
+                    if self._is_invalid_peak_data(peak_data):
+                        results.append({**peak_data, "action": "skipped", "skip_reason": "invalid_peak_data"})
+                        continue
+
+                    # 三层去重都通过，才记录波峰
+                    self._add_peak_to_memory(peak_data)
+                    self._write_peak_to_csv(peak_data)
+                    results.append({**peak_data, "action": "added"})
+                    self._add_log(f"添加红色波峰: [{start},{end}], 最大值: {peak_data['peak_max_value']:.1f}")
+
+                self.update_count += 1
+
+                return results
+
+        except Exception as e:
+            self._add_log(f"添加波峰数据失败: {e}", level="ERROR")
+
+        return []
+
+    def _create_peak_data(self,
+                         timestamp: datetime,
+                         frame_index: int,
+                         peak_type: str,
+                         start_frame: int,
+                         end_frame: int,
+                         curve: List[float],
+                         intersection: Optional[Tuple[int, int]],
+                         roi2_info: Optional[Dict[str, int]],
+                         gray_value: Optional[float],
+                         difference_threshold: float,
+                         pre_post_avg_frames: int = 5,
+                         threshold_used: Optional[float] = None,
+                         bg_mean: Optional[float] = None,
+                         roi3_curve: Optional[List[float]] = None,
+                         roi3_override_enabled: bool = False,
+                         roi3_override_threshold: float = 115.0) -> Dict[str, Any]:
+        """创建简化的波峰数据结构（只保留必要字段）"""
+
+        # 计算curve起始帧对应的全局帧索引
+        curve_start_global_frame = frame_index - len(curve) + 1
+
+        # 计算前X帧平均值（波峰开始前5帧）
+        pre_frames = int(pre_post_avg_frames) if int(pre_post_avg_frames) > 0 else 5
+        pre_start = max(0, start_frame - pre_frames)
+        pre_end = start_frame - 1
+        pre_avg = 0.0
+
+        if pre_start <= pre_end and pre_end < len(curve):
+            pre_values = curve[pre_start:pre_end + 1]
+            pre_avg = sum(pre_values) / len(pre_values) if pre_values else 0.0
+
+        # 前置帧范围的全局帧索引
+        pre_peak_frame_start = curve_start_global_frame + pre_start if pre_start <= pre_end else -1
+        pre_peak_frame_end = curve_start_global_frame + pre_end if pre_start <= pre_end else -1
+
+        # 计算后X帧平均值（波峰结束后5帧）
+        post_frames = int(pre_post_avg_frames) if int(pre_post_avg_frames) > 0 else 5
+        post_start = end_frame + 1
+        post_end = min(len(curve) - 1, end_frame + post_frames)
+        post_avg = 0.0
+
+        if 0 <= post_start <= post_end:
+            post_values = curve[post_start:post_end + 1]
+            post_avg = sum(post_values) / len(post_values) if post_values else 0.0
+
+        # 后置帧范围的全局帧索引
+        post_peak_frame_start = curve_start_global_frame + post_start if 0 <= post_start <= post_end else -1
+        post_peak_frame_end = curve_start_global_frame + post_end if 0 <= post_start <= post_end else -1
+
+        # 计算波峰区域最大值（用于连续同色去重）
+        frame_diff = post_avg - pre_avg
+        peak_max_value, peak_max_frame = self._get_peak_max_value(curve, start_frame, end_frame)
+
+        # ROI3 peak max calculation and override logic
+        roi3_peak_max_value = 0.0
+        roi3_peak_max_frame = -1
+        roi3_override_applied = False
+        final_peak_type = peak_type
+
+        if roi3_curve and roi3_override_enabled:
+            roi3_peak_max_value, roi3_max_curve_idx = self._get_peak_max_value(roi3_curve, start_frame, end_frame)
+
+            # 将curve中的索引转换为全局总帧数
+            # frame_index是当前帧的全局索引，curve长度是循环缓冲区大小
+            # curve[0]对应的全局帧 = frame_index - len(curve) + 1
+            roi3_peak_max_frame = curve_start_global_frame + roi3_max_curve_idx if roi3_max_curve_idx >= 0 else -1
+
+            # Apply ROI3 override logic: RED -> GREEN if ROI3 peak max > threshold
+            if peak_type == "red" and roi3_peak_max_value > roi3_override_threshold:
+                final_peak_type = "green"
+                roi3_override_applied = True
+
+        return {
+            'peak_type': final_peak_type,  # May be changed by ROI3 override
+            'frame_index': frame_index,
+            'pre_peak_avg': round(pre_avg, 2),
+            'post_peak_avg': round(post_avg, 2),
+            'frame_diff': round(frame_diff, 3),
+            'difference_threshold_used': round(float(difference_threshold), 3),
+            'threshold_used': round(float(threshold_used), 3) if threshold_used is not None else 0.0,
+            'bg_mean': round(float(bg_mean), 3) if bg_mean is not None else 0.0,
+            'peak_max_value': round(peak_max_value, 2),  # ROI2 peak max
+            'roi3_peak_max_value': round(roi3_peak_max_value, 2),
+            'roi3_peak_max_frame': roi3_peak_max_frame,  # ROI3最大值对应的全局帧索引
+            'pre_peak_frame_start': pre_peak_frame_start,  # 前置平均值计算的起始帧（全局）
+            'pre_peak_frame_end': pre_peak_frame_end,    # 前置平均值计算的结束帧（全局）
+            'post_peak_frame_start': post_peak_frame_start,  # 后置平均值计算的起始帧（全局）
+            'post_peak_frame_end': post_peak_frame_end,    # 后置平均值计算的结束帧（全局）
+            'roi3_override_applied': roi3_override_applied,
+            'roi3_override_threshold': round(float(roi3_override_threshold), 3)
+        }
+
+    def _create_hybrid_peak_data(self,
+                                timestamp: datetime,
+                                start_frame: int,
+                                end_frame: int,
+                                hybrid_peak: Dict[str, Any],
+                                frame_index: int,
+                                roi2_curve: List[float],
+                                roi1_curve: List[float] = None,
+                                intersection: Optional[Tuple[int, int]] = None,
+                                roi2_info: Optional[Dict[str, int]] = None,
+                                gray_value: Optional[float] = None,
+                                difference_threshold: float = 1.1,
+                                pre_post_avg_frames: int = 5,
+                                roi2_threshold_used: Optional[float] = None,
+                                roi1_threshold_used: float = 0.0,
+                                bg_mean: Optional[float] = None,
+                                roi3_curve: Optional[List[float]] = None,
+                                roi3_override_enabled: bool = False,
+                                roi3_override_threshold: float = 115.0) -> Dict[str, Any]:
+        """
+        创建混合检测波峰数据记录，包含ROI1和ROI2的完整信息
+
+        Args:
+            timestamp: 时间戳
+            start_frame: 波峰开始帧
+            end_frame: 波峰结束帧
+            hybrid_peak: 混合检测结果字典
+            frame_index: 当前帧索引
+            roi2_curve: ROI2灰度曲线
+            roi1_curve: ROI1灰度曲线
+            intersection: 绿线交点坐标
+            roi2_info: ROI2区域信息
+            gray_value: 当前ROI2灰度值
+            difference_threshold: ROI2颜色判定阈值
+            pre_post_avg_frames: 前后平均帧数
+            roi2_threshold_used: ROI2使用的阈值
+            roi1_threshold_used: ROI1使用的阈值
+            bg_mean: ROI2背景均值
+            roi3_curve: ROI3灰度曲线
+            roi3_override_enabled: 是否启用ROI3覆盖逻辑
+            roi3_override_threshold: ROI3覆盖阈值
+
+        Returns:
+            Dict: 混合检测波峰数据记录
+        """
+        # 获取混合检测的核心信息
+        color = hybrid_peak.get('color', 'unknown')
+        method = hybrid_peak.get('method', 'roi2')  # 'roi2' 或 'roi1_fallback'
+        confidence = hybrid_peak.get('confidence', 0.0)
+        quality_score = hybrid_peak.get('quality_score', 0.0)
+        roi1_frame_diff = hybrid_peak.get('roi1_frame_diff', 0.0)
+        roi2_frame_diff = hybrid_peak.get('roi2_frame_diff', 0.0)
+
+        # 计算curve起始帧对应的全局帧索引
+        curve_start_global_frame = frame_index - len(roi2_curve) + 1
+
+        # 计算ROI2在波峰区间的前后平均值（与_create_peak_data逻辑一致）
+        pre_frames = int(pre_post_avg_frames) if int(pre_post_avg_frames) > 0 else 5
+        pre_start = max(0, start_frame - pre_frames)
+        pre_end = start_frame - 1
+        pre_avg = 0.0
+
+        if pre_start <= pre_end and pre_end < len(roi2_curve):
+            pre_values = roi2_curve[pre_start:pre_end + 1]
+            pre_avg = sum(pre_values) / len(pre_values) if pre_values else 0.0
+
+        # 前置帧范围的全局帧索引
+        pre_peak_frame_start = curve_start_global_frame + pre_start if pre_start <= pre_end else -1
+        pre_peak_frame_end = curve_start_global_frame + pre_end if pre_start <= pre_end else -1
+
+        post_frames = int(pre_post_avg_frames) if int(pre_post_avg_frames) > 0 else 5
+        post_start = end_frame + 1
+        post_end = min(len(roi2_curve) - 1, end_frame + post_frames)
+        post_avg = 0.0
+
+        if 0 <= post_start <= post_end:
+            post_values = roi2_curve[post_start:post_end + 1]
+            post_avg = sum(post_values) / len(post_values) if post_values else 0.0
+
+        # 后置帧范围的全局帧索引
+        post_peak_frame_start = curve_start_global_frame + post_start if 0 <= post_start <= post_end else -1
+        post_peak_frame_end = curve_start_global_frame + post_end if 0 <= post_start <= post_end else -1
+
+        # 计算ROI1和ROI2在波峰区间的最大值
+        roi2_peak_max, _ = self._get_peak_max_value(roi2_curve, start_frame, end_frame)
+        roi1_peak_max = 0.0
+        if roi1_curve:
+            roi1_peak_max, _ = self._get_peak_max_value(roi1_curve, start_frame, end_frame)
+
+        # 计算ROI3在波峰区间的最大值并应用覆盖逻辑
+        roi3_peak_max = 0.0
+        roi3_peak_max_frame = -1
+        roi3_override_applied = False
+        final_peak_type = color
+
+        if roi3_curve and roi3_override_enabled:
+            roi3_peak_max, roi3_max_curve_idx = self._get_peak_max_value(roi3_curve, start_frame, end_frame)
+
+            # 将curve中的索引转换为全局总帧数
+            # frame_index是当前帧的全局索引，curve长度是循环缓冲区大小
+            # curve[0]对应的全局帧 = frame_index - len(curve) + 1
+            # 注意：这里使用roi2_curve的长度作为参考（所有缓冲区大小一致）
+            roi3_peak_max_frame = curve_start_global_frame + roi3_max_curve_idx if roi3_max_curve_idx >= 0 else -1
+
+            # 应用ROI3覆盖逻辑: RED -> GREEN 如果ROI3峰值 > 阈值
+            if final_peak_type == "red" and roi3_peak_max > roi3_override_threshold:
+                final_peak_type = "green"
+                roi3_override_applied = True
+                print(f"[DEBUG] ROI3 override applied: frame={frame_index}, red->green, roi3_max={roi3_peak_max:.2f}, roi3_global_frame={roi3_peak_max_frame}")
+
+        # 创建混合检测特有数据结构
+        hybrid_data = {
+            # 基础字段（兼容传统检测）
+            'peak_type': final_peak_type,
+            'frame_index': frame_index,
+            'pre_peak_avg': round(pre_avg, 2),
+            'post_peak_avg': round(post_avg, 2),
+            'frame_diff': round(roi2_frame_diff, 3),  # 使用ROI2的帧差作为主要判定依据
+            'difference_threshold_used': round(float(difference_threshold), 3),
+            'threshold_used': round(float(roi2_threshold_used), 3) if roi2_threshold_used is not None else 0.0,
+            'bg_mean': round(float(bg_mean), 3) if bg_mean is not None else 0.0,
+            'peak_max_value': round(roi2_peak_max, 2),
+            'roi3_peak_max_value': round(roi3_peak_max, 2),
+            'roi3_peak_max_frame': roi3_peak_max_frame,  # ROI3最大值对应的帧索引
+            'pre_peak_frame_start': pre_peak_frame_start,  # 前置平均值计算的起始帧（全局）
+            'pre_peak_frame_end': pre_peak_frame_end,    # 前置平均值计算的结束帧（全局）
+            'post_peak_frame_start': post_peak_frame_start,  # 后置平均值计算的起始帧（全局）
+            'post_peak_frame_end': post_peak_frame_end,    # 后置平均值计算的结束帧（全局）
+
+            # 混合检测特有字段
+            'detection_method': 'hybrid',
+            'detection_strategy': 'roi1_peaks_roi2_color',
+            'color_method': method,  # 'roi2' 或 'roi1_fallback'
+            'confidence_score': round(confidence, 3),
+            'quality_score': round(quality_score, 3),
+            'fallback_used': (method == 'roi1_fallback'),
+
+            # ROI1相关信息
+            'roi1_threshold_used': round(roi1_threshold_used, 3),
+            'roi1_frame_diff': round(roi1_frame_diff, 3),
+            'roi1_peak_max': round(roi1_peak_max, 2),
+            'peak_start_frame': start_frame,
+            'peak_end_frame': end_frame,
+            'peak_width_frames': end_frame - start_frame + 1,
+            'roi1_peak_id': hybrid_peak.get('roi1_peak_id', ''),
+            'roi1_peak_key': str(hybrid_peak.get('roi1_peak_key', '')),
+
+            # ROI2增强信息
+            'roi2_threshold_used': round(float(roi2_threshold_used), 3) if roi2_threshold_used is not None else 0.0,
+            'roi2_frame_diff': round(roi2_frame_diff, 3),
+            'roi2_pre_avg': round(hybrid_peak.get('pre_avg', pre_avg), 2),
+            'roi2_post_avg': round(hybrid_peak.get('post_avg', post_avg), 2),
+            'roi2_peak_max': round(roi2_peak_max, 2),
+
+            # 兼容字段
+            'intersection': intersection,
+            'roi2_info': roi2_info,
+            'gray_value': gray_value,
+            'timestamp': timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        }
+
+        return hybrid_data
+
+    def _calculate_classification_reason(self, frame_diff: float, threshold: float, peak_type: str) -> str:
+        """计算波峰分类原因（为什么是红色/绿色）"""
+        if peak_type == "green":
+            if frame_diff > threshold:
+                return f"稳定波峰: 帧差值{frame_diff:.2f} > 阈值{threshold:.2f}"
+            else:
+                return f"稳定波峰: 帧差值{frame_diff:.2f} >= 阈值{threshold:.2f}"
+        else:  # red
+            return f"不稳定波峰: 帧差值{frame_diff:.2f} < 阈值{threshold:.2f}"
+
+    def _calculate_peak_stability(self, peak_curve: List[float]) -> float:
+        """计算波峰稳定性（0-1，越接近1越稳定）"""
+        try:
+            if len(peak_curve) < 2:
+                return 0.0
+
+            # 计算标准差
+            mean_val = sum(peak_curve) / len(peak_curve)
+            variance = sum((x - mean_val) ** 2 for x in peak_curve) / len(peak_curve)
+            std_dev = variance ** 0.5
+
+            # 归一化稳定性评分
+            max_val = max(peak_curve) if peak_curve else 1
+            stability_score = max(0, 1 - (std_dev / max_val))
+
+            return min(1.0, stability_score)
+        except Exception:
+            return 0.0
+
+    def _calculate_quality_score(self, max_val: float, min_val: float, duration: int, frame_diff: float) -> float:
+        """计算波峰质量评分（0-100）"""
+        try:
+            # 基础评分：波峰高度
+            height_score = max_val - min_val
+
+            # 持续时间评分
+            duration_score = min(duration / 10.0, 1.0) * 20  # 最高20分
+
+            # 稳定性评分（帧差值越小越稳定）
+            stability_score = max(0, 20 - frame_diff)  # 最高20分
+
+            # 总分（最高100分）
+            total_score = height_score + duration_score + stability_score
+
+            return max(0, min(100, total_score))
+        except Exception:
+            return 0.0
+
+    def _is_duplicate_peak(self, peak_data: Dict[str, Any]) -> bool:
+        """检查是否为重复波峰（基于前后帧平均值去重）"""
+        try:
+            current_pre_avg = peak_data['pre_peak_avg']
+            current_post_avg = peak_data['post_peak_avg']
+            current_frame_index = peak_data['frame_index']
+
+            # 检查最近的5个波峰（task要求的窗口大小）
+            for recent_peak in self.recent_peaks[-self.duplicate_check_window:]:
+                recent_pre_avg = recent_peak.get('pre_peak_avg', 0)
+                recent_post_avg = recent_peak.get('post_peak_avg', 0)
+
+                # 增强的重复检测：考虑时间间隔和峰值高度
+                frame_diff = abs(current_frame_index - recent_peak.get('frame_index', 0))
+
+                # 前后帧平均值都接近（容差2.0）且时间间隔较小时才视为重复
+                pre_avg_diff = abs(recent_pre_avg - current_pre_avg)
+                post_avg_diff = abs(recent_post_avg - current_post_avg)
+
+                if (pre_avg_diff <= 2.0 and post_avg_diff <= 2.0):
+                    # 如果时间间隔超过200帧，不视为重复（不同时间段的相似信号）
+                    if frame_diff > 200:
+                        continue
+
+                    # 如果当前波峰峰值明显更高（>5%），不视为重复
+                    current_max = peak_data.get('peak_max_value', 0)
+                    recent_max = recent_peak.get('peak_max_value', 0)
+                    if current_max > recent_max * 1.05:  # 峰值高5%以上
+                        continue
+
+                    return True
+            return False
+        except Exception as e:
+            self._add_log(f"去重检查失败: {e}", level="ERROR")
+            return False
+
+    def _is_consecutive_duplicate(self, peak_data: Dict[str, Any], curve: List[float], start_frame: int, end_frame: int) -> bool:
+        """检查是否为连续重复波峰（支持跨颜色去重和优先级处理）"""
+        try:
+            # 调试信息：记录函数调用
+            current_type = peak_data['peak_type']
+            current_frame_index = peak_data['frame_index']
+            current_max_value = peak_data['peak_max_value']
+
+            self._add_log(f"[调试] _is_consecutive_duplicate被调用: {current_type}波峰帧{current_frame_index}, 峰值{current_max_value:.3f}")
+            self._add_log(f"[调试] 配置: 去重启用={self.consecutive_deduplication_enabled}, 跨颜色={self.cross_color_deduplication_enabled}, 窗口={self.consecutive_frame_window}帧")
+            self._add_log(f"[调试] 颜色优先级: {self.color_priority}")
+
+            if not self.consecutive_deduplication_enabled:
+                self._add_log(f"[调试] 去重功能已禁用，返回False")
+                return False
+
+            # 检查最近的波峰中是否有跨颜色连续波峰
+            for recent_peak in self.recent_peaks[-30:]:  # 增加检查范围
+                recent_frame_index = recent_peak['frame_index']
+                recent_max_value = recent_peak.get('peak_max_value', 0)
+                recent_type = recent_peak['peak_type']
+
+                # 检查是否在时间窗口内
+                time_diff = abs(current_frame_index - recent_frame_index)
+                self._add_log(f"[调试] 检查历史波峰: {recent_type}帧{recent_frame_index}, 峰值{recent_max_value:.3f}, 时间差={time_diff}帧")
+
+                if time_diff <= self.consecutive_frame_window:
+                    self._add_log(f"[调试] 在时间窗口内，检查峰值相同性: |{current_max_value:.3f} - {recent_max_value:.3f}| = {abs(current_max_value - recent_max_value):.3f}")
+
+                    # 检查峰值是否完全相同（考虑浮点数精度）
+                    if abs(current_max_value - recent_max_value) < 0.01:
+                        # 相同峰值，根据颜色优先级决定保留哪个
+
+                        # 使用配置的颜色优先级
+                        current_priority = self.color_priority.get(current_type, 0)
+                        recent_priority = self.color_priority.get(recent_type, 0)
+
+                        if current_priority > recent_priority:
+                            # 当前波峰优先级更高，移除之前较低优先级的波峰
+                            self._remove_lower_consecutive_peak(recent_peak)
+                            self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 优先级({current_priority}) 高于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) 优先级({recent_priority})，移除较低优先级")
+                            return False
+                        elif current_priority < recent_priority:
+                            # 当前波峰优先级更低，跳过当前波峰
+                            self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 优先级({current_priority}) 低于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) 优先级({recent_priority})，跳过当前波峰")
+                            return True
+                        else:
+                            # 相同优先级（同颜色），按时间顺序处理
+                            if current_frame_index <= recent_frame_index:
+                                self._add_log(f"相同优先级去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 与 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f}) 时间较晚，跳过当前波峰")
+                                return True
+                            else:
+                                # 当前波峰时间更晚，移除之前的
+                                self._remove_lower_consecutive_peak(recent_peak)
+                                self._add_log(f"相同优先级去重: {current_type}波峰帧{current_frame_index}(峰值{current_max_value:.3f}) 晚于 {recent_type}波峰帧{recent_frame_index}(峰值{recent_max_value:.3f})，移除较早波峰")
+                                return False
+                    elif current_max_value < recent_max_value:
+                        # 当前波峰更低，是重复波峰
+                        self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(高度{current_max_value:.1f}) 低于 {recent_type}波峰帧{recent_frame_index}(高度{recent_max_value:.1f})，跳过当前波峰")
+                        return True
+                    else:
+                        # 如果当前波峰更高，移除之前的较低波峰
+                        self._remove_lower_consecutive_peak(recent_peak)
+                        self._add_log(f"跨颜色去重: {current_type}波峰帧{current_frame_index}(高度{current_max_value:.1f}) 高于 {recent_type}波峰帧{recent_frame_index}(高度{recent_max_value:.1f})，移除较低的")
+                        return False
+
+            # 添加循环结束的调试信息
+            self._add_log(f"[调试] 检查完成，未找到重复波峰，返回False")
+
+            return False
+        except Exception as e:
+            self._add_log(f"[调试] 连续同色去重检查失败: {e}", level="ERROR")
+            return False
+
+    def _is_invalid_peak_data(self, peak_data: Dict[str, Any]) -> bool:
+        """检查波峰数据是否无效（前后帧平均值为0）"""
+        try:
+            pre_avg = peak_data.get('pre_peak_avg', 0)
+            post_avg = peak_data.get('post_peak_avg', 0)
+
+            # 如果前后帧平均值都是0，则认为数据无效
+            if pre_avg == 0 or post_avg == 0:
+                peak_type = peak_data.get('peak_type', 'unknown')
+                frame_index = peak_data.get('frame_index', 0)
+                self._add_log(f"无效波峰数据过滤: {peak_type}波峰帧{frame_index}, 前帧平均={pre_avg:.2f}, 后帧平均={post_avg:.2f}")
+                return True
+
+            return False
+        except Exception as e:
+            self._add_log(f"检查无效波峰数据失败: {e}", level="ERROR")
+            return False
+
+    def _get_peak_max_value(self, curve: List[float], start_frame: int, end_frame: int) -> Tuple[float, int]:
+        """
+        计算波峰区域的最大灰度值及其对应的帧索引
+
+        Returns:
+            Tuple[float, int]: (最大灰度值, 最大值对应的绝对帧索引)
+        """
+        try:
+            if start_frame < 0 or end_frame >= len(curve) or start_frame > end_frame:
+                return 0.0, -1
+
+            peak_region = curve[start_frame:end_frame + 1]
+            if not peak_region:
+                return 0.0, -1
+
+            max_value = max(peak_region)
+            # 找到最大值在peak_region中的相对索引，加上start_frame得到绝对索引
+            relative_index = peak_region.index(max_value)
+            absolute_frame_index = start_frame + relative_index
+
+            return max_value, absolute_frame_index
+        except Exception as e:
+            self._add_log(f"计算波峰最大值失败: {e}", level="ERROR")
+            return 0.0, -1
+
+    def _remove_lower_consecutive_peak(self, peak_to_remove: Dict[str, Any]):
+        """从统计记录中移除较低的连续同色波峰"""
+        try:
+            # 从内存缓存中移除
+            if peak_to_remove in self.recent_peaks:
+                self.recent_peaks.remove(peak_to_remove)
+
+            if peak_to_remove in self.stats_data:
+                self.stats_data.remove(peak_to_remove)
+
+            # 从CSV文件中移除（重新写入整个文件）
+            self._rewrite_csv_without_peak(peak_to_remove)
+
+            self._add_log(f"已移除较低的同色波峰: {peak_to_remove['peak_type']} 帧{peak_to_remove['frame_index']}")
+        except Exception as e:
+            self._add_log(f"移除较低波峰失败: {e}", level="ERROR")
+
+    def _rewrite_csv_without_peak(self, peak_to_remove: Dict[str, Any]):
+        """重新写入CSV文件，移除指定的波峰"""
+        try:
+            if not os.path.exists(self.csv_path):
+                return
+
+            # 读取现有数据
+            rows_to_keep = []
+            with open(self.csv_path, 'r', encoding='utf-8-sig') as csvfile:
+                reader = csv.DictReader(csvfile)
+                fieldnames = reader.fieldnames
+
+                for row in reader:
+                    # 检查是否为要移除的波峰
+                    if (row['peak_type'] == peak_to_remove['peak_type'] and
+                        int(row['frame_index']) == peak_to_remove['frame_index'] and
+                        float(row['pre_peak_avg']) == peak_to_remove['pre_peak_avg'] and
+                        float(row['post_peak_avg']) == peak_to_remove['post_peak_avg']):
+                        continue  # 跳过要移除的行
+                    rows_to_keep.append(row)
+
+            # 重新写入文件
+            with open(self.csv_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows_to_keep)
+
+            self._add_log(f"CSV文件已重写，移除了1个较低的同色波峰，保留{len(rows_to_keep)}个波峰")
+        except Exception as e:
+            self._add_log(f"重写CSV文件失败: {e}", level="ERROR")
+
+    def _add_peak_to_memory(self, peak_data: Dict[str, Any]):
+        """添加波峰到内存缓存"""
+        self.recent_peaks.append(peak_data)
+        self.stats_data.append(peak_data)
+
+        # 保持内存缓存大小（最近5个波峰用于去重）
+        if len(self.recent_peaks) > self.max_recent_peaks * 2:
+            self.recent_peaks = self.recent_peaks[-self.max_recent_peaks:]
+
+    def _write_peak_to_csv(self, peak_data: Dict[str, Any]):
+        """写入单个波峰到CSV文件"""
+        try:
+            # 简化的字段列表（只保存CSV中需要的字段）
+            fieldnames = [
+                'peak_type',
+                'frame_index',
+                'pre_peak_avg',
+                'post_peak_avg',
+                'frame_diff',
+                'difference_threshold_used',
+                'threshold_used',
+                'bg_mean',
+                'peak_max_value',
+                'roi3_peak_max_value',
+                'roi3_peak_max_frame',
+                'pre_peak_frame_start',
+                'pre_peak_frame_end',
+                'post_peak_frame_start',
+                'post_peak_frame_end',
+            ]
+
+            # 过滤数据，只包含CSV需要的字段
+            csv_data = {key: peak_data[key] for key in fieldnames if key in peak_data}
+
+            # 原子性写入：先写临时文件，再重命名
+            temp_file = self.csv_path + '.tmp'
+
+            # 如果原文件存在，复制内容
+            if os.path.exists(self.csv_path):
+                shutil.copy2(self.csv_path, temp_file)
+
+            # 追加新数据
+            with open(temp_file, 'a', newline='', encoding='utf-8-sig') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writerow(csv_data)
+
+            # 原子性重命名
+            if os.path.exists(self.csv_path):
+                os.remove(self.csv_path)
+            os.rename(temp_file, self.csv_path)
+
+        except Exception as e:
+            self._add_log(f"写入CSV失败: {e}", level="ERROR")
+
+    
+    def export_final_csv(self) -> Optional[str]:
+        """程序结束时返回CSV文件路径（不再创建final文件）"""
+        try:
+            self._add_log("完成数据收集，返回CSV文件路径...")
+
+            if not os.path.exists(self.csv_path):
+                self._add_log("没有数据文件可导出")
+                return None
+
+            self._add_log(f"CSV文件路径: {self.csv_path}")
+            return os.path.abspath(self.csv_path)
+
+        except Exception as e:
+            self._add_log(f"返回CSV文件路径失败: {e}", level="ERROR")
+            return None
+
+    def get_statistics_summary(self) -> Dict[str, Any]:
+        """获取统计摘要"""
+        try:
+            with self.lock:
+                total_peaks = len(self.stats_data)
+                green_peaks = len([p for p in self.stats_data if p['peak_type'] == 'green'])
+                red_peaks = len([p for p in self.stats_data if p['peak_type'] == 'red'])
+
+                avg_duration = 0
+                avg_max_value = 0
+                avg_frame_diff = 0
+                if self.stats_data:
+                    avg_duration = sum(p['duration'] for p in self.stats_data) / total_peaks
+                    avg_max_value = sum(p['max_value'] for p in self.stats_data) / total_peaks
+                    avg_frame_diff = sum(p['frame_diff'] for p in self.stats_data) / total_peaks
+
+                return {
+                    'total_peaks': total_peaks,
+                    'green_peaks': green_peaks,
+                    'red_peaks': red_peaks,
+                    'avg_duration': round(avg_duration, 2),
+                    'avg_max_value': round(avg_max_value, 2),
+                    'avg_frame_diff': round(avg_frame_diff, 3),
+                    'session_id': self.session_id,
+                    'session_duration': str(datetime.now() - self.start_time).split('.')[0],
+                    'csv_file_path': self.csv_path,
+                    'final_export_path': self.final_export_path,
+                    'csv_exists': os.path.exists(self.csv_path),
+                    'csv_size_mb': round(os.path.getsize(self.csv_path) / (1024*1024), 2) if os.path.exists(self.csv_path) else 0
+                }
+        except Exception as e:
+            self._add_log(f"获取统计摘要失败: {e}", level="ERROR")
+            return {}
+
+    def save_csv_file(self) -> Optional[str]:
+        """保存CSV文件并返回路径（用于UI调用）"""
+        try:
+            if os.path.exists(self.csv_path):
+                return os.path.abspath(self.csv_path)
+            else:
+                return None
+        except Exception as e:
+            self._add_log(f"保存CSV文件失败: {e}", level="ERROR")
+            return None
+
+    def _add_log(self, message: str, level: str = "INFO"):
+        """添加日志记录"""
+        try:
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            log_message = f"[{timestamp}] {level}: SafePeakStatistics - {message}"
+            print(log_message)  # 输出到控制台
+        except Exception:
+            pass  # 日志记录失败不应该影响主要功能
+
+
+# 全局实例
+safe_statistics = SafePeakStatistics()
