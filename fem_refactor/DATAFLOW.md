@@ -134,6 +134,8 @@
   - 传统模式：传入 `green_peaks/red_peaks + curve`
   - 混合模式：传入 `hybrid_peaks`（优先使用）
 
+> 实现位置：`fem_refactor/stats_sink.py`（`add_peaks_to_statistics()`）。
+
 统计系统负责：
 - 多层去重（含 ROI1 peak_id 去重、连续同色去重、跨颜色策略等）
 - 计算并写入 CSV（`export/peak_statistics_<session>.csv`）
@@ -144,6 +146,8 @@
 - 保存 ROI1/2/3 截图
 - 保存波形图（ROI2、ROI1 等）
 - video 模式通常按“每视频”建立 `tmp/<video_name>/...` 目录
+
+> 实现位置：`fem_refactor/artifact_saver.py`（`save_frame_artifacts()`）。
 
 ## 9. 分析缓存（Analysis Cache JSONL）
 

@@ -53,16 +53,17 @@
   - 混合检测：`hybrid_peak_detection(roi1_peaks -> roi2_color)`
   - 传统检测：`detect_peaks(roi2_curve)`
   - fallback 条件、data_quality 检查、min_region_length 过滤（保持顺序）
-- [ ] `stats_sink.py`：`SafePeakStatistics.add_peaks_from_daemon` 调用封装（参数一字不差传递）
-- [ ] `artifact_saver.py`：ROI1/2/3/wave 保存策略（`only_delect`、目录结构）
+- [x] `stats_sink.py`：`SafePeakStatistics.add_peaks_from_daemon` 调用封装（参数一字不差传递）
+- [x] `artifact_saver.py`：ROI1/2/3/wave 保存策略（`only_delect`、目录结构）
 
 验收：
 - `export/peak_statistics_*.csv` 行数/内容一致（同一输入视频同一配置）。
 
 ### 7) 主循环编排（最高风险）
-- [ ] `daemon_loop.py`：把 `while True` 的循环体拆为“单帧处理 step()”
-- [ ] `orchestrator.py`：顶层编排（启动→模式→循环→收尾）
-- [ ] 根入口 `simple_roi_daemon.py`：只保留 `main()` 调用 orchestrator
+- [x] `daemon_loop.py`：迁移 `run_daemon()` 主循环实现
+- [x] `orchestrator.py`：顶层入口（委派到 `daemon_loop`）
+- [x] 根入口 `simple_roi_daemon.py`：只保留入口调用（兼容 `python simple_roi_daemon.py`）
+- [ ] （可选）把 `while True` 循环体进一步拆为 `step()`（需要额外回归验证）
 
 验收：
 - 运行方式兼容：
