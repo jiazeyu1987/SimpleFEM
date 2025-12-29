@@ -51,105 +51,13 @@ from fem_refactor.video_source import (
     get_video_frame,
     initialize_video_capture,
 )
-
-
-
-def manage_threshold_protection(
-    current_gray: float,
-    current_threshold: float,
-    has_peaks: bool,
-    frame_time: float,
-    frame_index: int,
-    # State variables (passed by reference)
-    protection_active: bool,
-    protection_end_time: float,
-    consecutive_below: int,
-    last_waveform_time: float,
-    # Configuration
-    enabled: bool = True,
-    recovery_delay_frames: int = 10,
-    stability_frames: int = 5,
-    waveform_trigger: bool = True,
-    threshold_minimum: float = 80.0,
-) -> Tuple[bool, float, int, int, float]:
-    """
-    管理阈值保护状态
-
-    Args:
-        current_gray: 当前灰度值
-        current_threshold: 当前阈值
-        has_peaks: 当前帧是否检测到波峰
-        frame_time: 当前帧的时间戳
-        frame_index: 当前帧索引
-        protection_active: 保护状态是否激活
-        protection_end_time: 保护结束时间
-        consecutive_below: 连续低于阈值的帧数
-        last_waveform_time: 上次波形时间
-        enabled: 是否启用保护机制
-        recovery_delay_frames: 恢复延迟帧数
-        stability_frames: 稳定性帧数要求
-        waveform_trigger: 是否启用波形触发
-        threshold_minimum: 阈值下限，确保阈值不会低于此值
-
-    Returns:
-        Tuple[bool, float, int, int, float]:
-            (should_protect, new_end_time, new_consecutive_below, frames_since_end, new_waveform_time)
-    """
-    current_time = frame_time
-    frames_since_end = max(0, int((current_time - protection_end_time) / (1.0/10)))  # 假设10fps
-
-    if not enabled:
-        return False, protection_end_time, consecutive_below, frames_since_end, last_waveform_time
-
-    # 检查是否需要触发保护
-    should_protect = protection_active
-
-    # 1. 波形触发：当前灰度超过阈值时立即触发保护
-    if waveform_trigger and current_gray >= current_threshold:
-        should_protect = True
-        last_waveform_time = current_time
-        if not protection_active:
-            msg = f"[阈值保护] 帧{frame_index} 波形触发保护: 灰度={current_gray:.1f} >= 阈值={current_threshold:.1f}"
-            logging.info(msg)
-            print(msg)
-
-    # 2. 波峰结果触发：检测到波峰时激活保护
-    elif has_peaks and not protection_active:
-        should_protect = True
-        last_waveform_time = current_time
-        msg = f"[阈值保护] 帧{frame_index} 波峰触发保护: 检测到波峰"
-        logging.info(msg)
-        print(msg)
-
-    # 3. 检查是否可以解除保护
-    if should_protect:
-        # 计算应该的结束时间
-        planned_end_time = last_waveform_time + (recovery_delay_frames * 0.1)  # 0.1秒每帧
-
-        # 检查稳定性条件：连续多帧低于阈值
-        if current_gray < current_threshold:
-            consecutive_below += 1
-        else:
-            consecutive_below = 0
-
-        # 智能退出：满足延迟时间和稳定性条件
-        time_condition = current_time >= planned_end_time
-        stability_condition = consecutive_below >= stability_frames
-
-        if time_condition and stability_condition:
-            should_protect = False
-            consecutive_below = 0
-            frames_since_end = 0
-            msg = f"[阈值保护] 帧{frame_index} 解除保护: 满足时间延迟({recovery_delay_frames}帧)和稳定性({stability_frames}帧)条件"
-            logging.info(msg)
-            print(msg)
-        else:
-            # 更新结束时间
-            protection_end_time = planned_end_time
-
-    return should_protect, protection_end_time, consecutive_below, frames_since_end, last_waveform_time
-
-
+from fem_refactor.threshold_manager import update_roi1_threshold_state, update_roi2_threshold_state
+from fem_refactor.threshold_protection import manage_threshold_protection
+from fem_refactor.signal_buffers import (
+    create_signal_buffers,
+    reset_roi1_state,
+    reset_video_state_variables,
+)
 def _get_base_dir() -> str:
     """
     Resolve base directory both for source (.py) and frozen (.exe) modes.
@@ -161,42 +69,6 @@ def _get_base_dir() -> str:
 
 
 BASE_DIR = _get_base_dir()
-
-
-def reset_video_state_variables(
-    gray_buffer=None,
-    bg_count=None,
-    bg_mean=None,
-    last_intersection_roi=None,
-    frames_since_protection_end=None,
-    threshold_protection_active=None,
-    protection_end_time=None,
-    consecutive_below_threshold=None,
-    last_waveform_time=None,
-    frame_index=None,
-    first_video_frame=None
-) -> None:
-    """
-    重置视频处理相关的状态变量，防止多视频分析时数据污染
-
-    这个函数返回重置后的值，调用者需要重新赋值
-    """
-    if gray_buffer is not None:
-        gray_buffer.clear()
-
-    # 返回重置后的值
-    return (
-        0,  # bg_count
-        0.0,  # bg_mean
-        None,  # last_intersection_roi
-        0,  # frames_since_protection_end
-        False,  # threshold_protection_active
-        0.0,  # protection_end_time
-        0,  # consecutive_below_threshold
-        0.0,  # last_waveform_time
-        0,  # frame_index
-        True  # first_video_frame
-    )
 
 
 def _setup_import_paths() -> None:
@@ -1062,7 +934,7 @@ def run_daemon() -> None:
 
         logger = setup_peak_logger()
         # Store only the latest 100 gray values for waveform / peak detection
-        gray_buffer: Deque[float] = deque(maxlen=100)
+        gray_buffer: Deque[float]
         # Track a session-wide "background mean" using a gated incremental mean:
         # only update the mean when the current gray value is below the current
         # (mean-based) threshold, so peak frames do not contaminate the baseline.
@@ -1079,7 +951,7 @@ def run_daemon() -> None:
         last_waveform_time: float = 0.0
 
         # ROI1 independent buffer and state (parallel to ROI2)
-        roi1_gray_buffer: Deque[float] = deque(maxlen=100)
+        roi1_gray_buffer: Deque[float]
         roi1_bg_count: int = 0
         roi1_bg_mean: float = 0.0
         roi1_threshold_protection_active: bool = False
@@ -1088,11 +960,21 @@ def run_daemon() -> None:
         roi1_last_waveform_time: float = 0.0
 
         # ROI3 independent buffer (same structure as ROI2)
-        roi3_gray_buffer: Deque[float] = deque(maxlen=100)
-        roi3_80_160_buffer: Deque[float] = deque(maxlen=100)
-        roi3_g1_buffer: Deque[float] = deque(maxlen=100)  # G1值缓冲区
-        roi3_g2_buffer: Deque[float] = deque(maxlen=100)  # G2值缓冲区
-        roi3_column_diff_buffer: Deque[float] = deque(maxlen=100)  # ROI3列灰度差值缓冲区
+        roi3_gray_buffer: Deque[float]
+        roi3_80_160_buffer: Deque[float]
+        roi3_g1_buffer: Deque[float]  # G1值缓冲区
+        roi3_g2_buffer: Deque[float]  # G2值缓冲区
+        roi3_column_diff_buffer: Deque[float]  # ROI3列灰度差值缓冲区
+
+        (
+            gray_buffer,
+            roi1_gray_buffer,
+            roi3_gray_buffer,
+            roi3_80_160_buffer,
+            roi3_g1_buffer,
+            roi3_g2_buffer,
+            roi3_column_diff_buffer,
+        ) = create_signal_buffers(maxlen=100)
 
         # Initialize ROI1 threshold used so hybrid detection can reference it
         # before the per-frame ROI1 adaptive-threshold block runs.
@@ -1293,13 +1175,18 @@ def run_daemon() -> None:
                                  last_waveform_time, frame_index, first_video_frame) = reset_values
 
                                 # 重置ROI1状态变量
-                                roi1_bg_count = 0
-                                roi1_bg_mean = 0.0
-                                roi1_threshold_protection_active = False
-                                roi1_protection_end_time = 0.0
-                                roi1_consecutive_below_threshold = 0
-                                roi1_last_waveform_time = 0.0
-                                roi1_threshold_used = max(roi1_threshold, roi1_threshold_minimum)
+                                (
+                                    roi1_bg_count,
+                                    roi1_bg_mean,
+                                    roi1_threshold_protection_active,
+                                    roi1_protection_end_time,
+                                    roi1_consecutive_below_threshold,
+                                    roi1_last_waveform_time,
+                                    roi1_threshold_used,
+                                ) = reset_roi1_state(
+                                    roi1_threshold=roi1_threshold,
+                                    roi1_threshold_minimum=roi1_threshold_minimum,
+                                )
 
                                 # 重置ROI1波峰ID管理机制
                                 processed_roi1_peaks.clear()
@@ -1510,66 +1397,40 @@ def run_daemon() -> None:
                 red_peaks: List[Tuple[int, int]] = []
                 green_peaks_raw: List[Tuple[int, int]] = []
                 red_peaks_raw: List[Tuple[int, int]] = []
-                threshold_used = max(threshold, threshold_minimum)
-                recent_frames_count: Optional[int] = None
-                calculated_bg_mean: Optional[float] = None
+                (
+                    threshold_used,
+                    recent_frames_count,
+                    calculated_bg_mean,
+                    bg_mean,
+                    bg_count,
+                    threshold_protection_active,
+                    protection_end_time,
+                    consecutive_below_threshold,
+                    frames_since_protection_end,
+                    last_waveform_time,
+                ) = update_roi2_threshold_state(
+                    gray_buffer=gray_buffer,
+                    adaptive_threshold_enabled=adaptive_threshold_enabled,
+                    adaptive_window_frames=adaptive_window_frames,
+                    threshold=threshold,
+                    threshold_minimum=threshold_minimum,
+                    threshold_over_mean_ratio=threshold_over_mean_ratio,
+                    roi2_gray=roi2_gray,
+                    frame_index=frame_index,
+                    protection_enabled=protection_enabled,
+                    recovery_delay_frames=recovery_delay_frames,
+                    stability_frames=stability_frames,
+                    waveform_trigger_enabled=waveform_trigger_enabled,
+                    threshold_protection_active=threshold_protection_active,
+                    protection_end_time=protection_end_time,
+                    consecutive_below_threshold=consecutive_below_threshold,
+                    frames_since_protection_end=frames_since_protection_end,
+                    last_waveform_time=last_waveform_time,
+                    bg_mean=bg_mean,
+                    bg_count=bg_count,
+                 )
 
-                if gray_buffer:
-                    curve = list(gray_buffer)
-                    # 调试：输出缓冲区状态
-                    print(f"[DEBUG] Buffer status: len={len(gray_buffer)}, adaptive_frames={adaptive_window_frames}, enabled={adaptive_threshold_enabled}")
-
-                    # Calculate adaptive threshold if enabled and enough history is available
-                    if (
-                        adaptive_threshold_enabled
-                        and len(gray_buffer) >= adaptive_window_frames
-                    ):
-                        # Calculate recent mean (last adaptive_window_frames from gray_buffer)
-                        recent_frames_count = min(len(gray_buffer), adaptive_window_frames)
-                        recent_frames = list(gray_buffer)[-recent_frames_count:]
-                        calculated_bg_mean = sum(recent_frames) / len(recent_frames)
-
-                        # First, check if we're already in protection mode and need to extend it
-                        current_time = time.time()
-                        if threshold_protection_active:
-                            # Check protection status with current gray value
-                            (threshold_protection_active, protection_end_time,
-                             consecutive_below_threshold, frames_since_protection_end,
-                             last_waveform_time) = manage_threshold_protection(
-                                current_gray=roi2_gray if roi2_gray is not None else 0,
-                                current_threshold=threshold_used,
-                                has_peaks=False,  # Will check again after detection
-                                frame_time=current_time,
-                                frame_index=frame_index,
-                                protection_active=threshold_protection_active,
-                                protection_end_time=protection_end_time,
-                                consecutive_below=consecutive_below_threshold,
-                                last_waveform_time=last_waveform_time,
-                                enabled=protection_enabled,
-                                recovery_delay_frames=recovery_delay_frames,
-                                stability_frames=stability_frames,
-                                waveform_trigger=waveform_trigger_enabled,
-                                threshold_minimum=threshold_minimum,
-                            )
-
-                        # Only update background mean when protection is not active
-                        if not threshold_protection_active:
-                            bg_mean = calculated_bg_mean
-                            bg_count = recent_frames_count
-                            # 调试：输出背景均值更新信息
-                            print(f"[DEBUG] bg_mean updated: {bg_mean:.2f}, bg_count={bg_count}, buffer_len={len(gray_buffer)}")
-                            if adaptive_threshold_enabled and bg_mean > 0:
-                                threshold_used = bg_mean * (1.0 + threshold_over_mean_ratio)
-                                # Apply minimum threshold constraint
-                                threshold_used = max(threshold_used, threshold_minimum)
-                        else:
-                            # Use last known background mean during protection
-                            if bg_mean > 0:
-                                threshold_used = bg_mean * (1.0 + threshold_over_mean_ratio)
-                                # Apply minimum threshold constraint even during protection
-                                threshold_used = max(threshold_used, threshold_minimum)
-                            #print(f"[阈值保护] 保护期间使用冻结阈值: {threshold_used:.1f} (下限: {threshold_minimum:.1f})")
-
+                if True:
                     # 混合检测模式集成
                     detection_mode = "roi2_legacy"
                     hybrid_peaks: List[Dict[str, Any]] = []
@@ -1721,44 +1582,21 @@ def run_daemon() -> None:
                 # ROI1 adaptive threshold calculation (independent from ROI2)
                 roi1_threshold_used = max(roi1_threshold, roi1_threshold_minimum)
                 roi1_curve = list(roi1_gray_buffer) if roi1_gray_buffer else []
-                if roi1_enabled and roi1_gray_buffer:
-                    # 每50帧打印一次ROI1阈值使用情况
-                    if frame_index % 50 == 0:
-                        print(f"[ROI1阈值] 配置值={roi1_threshold:.1f}, 下限={roi1_threshold_minimum:.1f}, 使用={roi1_threshold_used:.1f}")
-                        if roi1_adaptive_threshold_enabled and roi1_bg_count > 0:
-                            print(f"[ROI1阈值] 自适应背景均值={roi1_bg_mean:.1f}, 比例={roi1_threshold_over_mean_ratio:.2f}")
-                        else:
-                            print(f"[ROI1阈值] 使用固定阈值")
-                    roi1_adaptive_window_frames = int(roi1_adaptive_window_seconds * effective_frame_rate)
-                    roi1_adaptive_window_frames = max(1, min(roi1_adaptive_window_frames, 100))
-
-                    if (roi1_adaptive_threshold_enabled and
-                        len(roi1_gray_buffer) >= roi1_adaptive_window_frames):
-
-                        # Calculate ROI1 recent mean
-                        roi1_recent_frames_count = min(len(roi1_gray_buffer), roi1_adaptive_window_frames)
-                        roi1_recent_frames = list(roi1_gray_buffer)[-roi1_recent_frames_count:]
-                        roi1_calculated_bg_mean = sum(roi1_recent_frames) / len(roi1_recent_frames)
-
-                        # Check ROI1 threshold protection status
-                        current_time = time.time()
-                        if roi1_threshold_protection_active:
-                            # Manage ROI1 threshold protection with current gray value
-                            # For now, use last known background mean during protection
-                            if roi1_bg_mean > 0:
-                                roi1_threshold_used = roi1_bg_mean * (1.0 + roi1_threshold_over_mean_ratio)
-                                roi1_threshold_used = max(roi1_threshold_used, roi1_threshold_minimum)
-                        else:
-                            # Update ROI1 background mean if current value is below threshold
-                            if roi1_gray < roi1_threshold_used:
-                                roi1_bg_count += 1
-                                # Incremental mean update: new_mean = old_mean + (new_value - old_mean) / count
-                                roi1_bg_mean = roi1_bg_mean + (roi1_gray - roi1_bg_mean) / roi1_bg_count
-
-                            # Calculate ROI1 adaptive threshold if we have enough background samples
-                            if roi1_adaptive_threshold_enabled and roi1_bg_mean > 0:
-                                roi1_threshold_used = roi1_bg_mean * (1.0 + roi1_threshold_over_mean_ratio)
-                                roi1_threshold_used = max(roi1_threshold_used, roi1_threshold_minimum)
+                roi1_threshold_used, roi1_bg_mean, roi1_bg_count = update_roi1_threshold_state(
+                    roi1_enabled=roi1_enabled,
+                    roi1_gray_buffer=roi1_gray_buffer,
+                    roi1_gray=roi1_gray,
+                    frame_index=frame_index,
+                    effective_frame_rate=effective_frame_rate,
+                    roi1_threshold=roi1_threshold,
+                    roi1_threshold_minimum=roi1_threshold_minimum,
+                    roi1_threshold_over_mean_ratio=roi1_threshold_over_mean_ratio,
+                    roi1_adaptive_threshold_enabled=roi1_adaptive_threshold_enabled,
+                    roi1_adaptive_window_seconds=roi1_adaptive_window_seconds,
+                    roi1_threshold_protection_active=roi1_threshold_protection_active,
+                    roi1_bg_mean=roi1_bg_mean,
+                    roi1_bg_count=roi1_bg_count,
+                )
 
                 green_count = len(green_peaks)
                 red_count = len(red_peaks)

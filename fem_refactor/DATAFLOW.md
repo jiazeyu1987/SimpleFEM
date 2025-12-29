@@ -72,7 +72,7 @@
 - 使用 `compute_roi2_region((roi1_w,roi1_h),(center_x,center_y),roi2_extension_params)`
 - `roi2_image = roi1_image.crop(roi2_region)`
 - `roi2_gray = compute_average_gray(roi2_image)`
-- 更新 `gray_buffer`（deque maxlen=100）
+- 更新 `gray_buffer`（deque maxlen=100，创建/重置见 `fem_refactor/signal_buffers.py`）
 
 ### 4.3 ROI3（围绕交点）
 若启用 ROI3 配置：
@@ -81,6 +81,8 @@
   - `roi3_gray`
   - `g1/g2`（灰度直方图区间占比）
   - `column_diff`（列均值最大-最小差）
+
+> 注：ROI1/ROI2/ROI3 的所有 deque buffer 统一由 `create_signal_buffers()` 创建，切换视频时相关重置逻辑集中在 `reset_video_state_variables()` / `reset_roi1_state()`。
 
 ## 5. 阈值计算与保护（Adaptive Threshold + Protection）
 

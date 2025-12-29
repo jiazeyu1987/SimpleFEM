@@ -3,11 +3,11 @@
   "processing_mode": "video",
   "data_processing": {
     "_comment": "数据保存/日志策略（only_delect=true 表示只有检测到波峰才保存/记录）。",
-    "save_roi1": true,
-    "save_roi2": true,
-    "save_roi3": true,
-    "save_wave": true,
-    "save_roi1_wave": true,
+    "save_roi1": false,
+    "save_roi2": false,
+    "save_roi3": false,
+    "save_wave": false,
+    "save_roi1_wave": false,
     "only_delect": false
   },
   "analysis_cache": {

@@ -42,8 +42,8 @@
 - `roi_analysis_cache` 中 `intersection.current/used` 行为一致（特别是失败回退路径）。
 
 ### 5) 阈值与缓冲（中高风险）
-- [ ] `signal_buffers.py`：ROI1/ROI2/ROI3 的 deque、背景均值计数器、状态重置
-- [ ] `threshold_manager.py`：自适应阈值计算 + `manage_threshold_protection` 状态机（逻辑完全照搬）
+- [x] `signal_buffers.py`：ROI1/ROI2/ROI3 的 deque、背景均值计数器、状态重置
+- [x] `threshold_manager.py`：自适应阈值计算 + `manage_threshold_protection` 状态机（逻辑完全照搬）
 
 验收：
 - `threshold.used/bg_mean/bg_count/protection_active` 的时间序列一致（可通过 cache jsonl 对比）。
