@@ -35,7 +35,7 @@ def test_roi2_sampling_window():
     # 2. 测试核心算法
     print("\n2. 测试核心算法...")
     try:
-        from simple_roi_daemon import determine_roi2_color_in_interval
+        from fem_refactor.detection_pipeline import determine_roi2_color_in_interval
 
         # 创建测试ROI2曲线
         import numpy as np

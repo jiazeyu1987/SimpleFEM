@@ -54,6 +54,18 @@ from fem_refactor.video_source import (
 from fem_refactor.detection_pipeline import run_peak_detection_step
 from fem_refactor.artifact_saver import save_frame_artifacts
 from fem_refactor.stats_sink import add_peaks_to_statistics
+from fem_refactor.frame_step import process_frame
+from fem_refactor.models import (
+    Buffers,
+    ConfigValues,
+    DaemonContext,
+    Managers,
+    Paths,
+    Roi1ThresholdState,
+    RuntimeState,
+    ThresholdState,
+    VideoState,
+)
 from fem_refactor.threshold_manager import update_roi1_threshold_state, update_roi2_threshold_state
 from fem_refactor.threshold_protection import manage_threshold_protection
 from fem_refactor.signal_buffers import (
@@ -507,6 +519,126 @@ def run_daemon() -> None:
         except Exception:
             pass
 
+        ctx = DaemonContext(
+            cfg=ConfigValues(
+                raw=config,
+                roi_default=roi_default,
+                extension_params=extension_params,
+                roi3_extension_params=roi3_extension_params,
+                save_roi1=save_roi1,
+                save_roi2=save_roi2,
+                save_roi3=save_roi3,
+                save_wave=save_wave,
+                save_roi1_wave=save_roi1_wave,
+                only_delect=only_delect,
+                threshold=threshold,
+                threshold_minimum=threshold_minimum,
+                margin_frames=margin_frames,
+                diff_threshold=diff_threshold,
+                silence_frames=silence_frames,
+                pre_post_avg_frames=pre_post_avg_frames,
+                min_region_length=min_region_length,
+                adaptive_threshold_enabled=adaptive_threshold_enabled,
+                threshold_over_mean_ratio=threshold_over_mean_ratio,
+                adaptive_window_seconds=adaptive_window_seconds,
+                adaptive_window_frames=adaptive_window_frames,
+                protection_enabled=protection_enabled,
+                recovery_delay_seconds=recovery_delay_seconds,
+                recovery_delay_frames=recovery_delay_frames,
+                stability_frames=stability_frames,
+                waveform_trigger_enabled=waveform_trigger_enabled,
+                roi1_enabled=roi1_enabled,
+                roi1_threshold=roi1_threshold,
+                roi1_threshold_minimum=roi1_threshold_minimum,
+                roi1_margin_frames=roi1_margin_frames,
+                roi1_silence_frames=roi1_silence_frames,
+                roi1_pre_post_avg_frames=roi1_pre_post_avg_frames,
+                roi1_difference_threshold=roi1_difference_threshold,
+                roi1_min_region_length=roi1_min_region_length,
+                roi1_adaptive_threshold_enabled=roi1_adaptive_threshold_enabled,
+                roi1_threshold_over_mean_ratio=roi1_threshold_over_mean_ratio,
+                roi1_adaptive_window_seconds=roi1_adaptive_window_seconds,
+                roi1_protection_enabled=roi1_protection_enabled,
+                roi1_recovery_delay_seconds=roi1_recovery_delay_seconds,
+                roi1_stability_frames=roi1_stability_frames,
+                roi1_waveform_trigger_enabled=roi1_waveform_trigger_enabled,
+                hybrid_enabled=hybrid_enabled,
+                roi2_pre_frames=roi2_pre_frames,
+                roi2_post_frames=roi2_post_frames,
+                min_roi2_frames=min_roi2_frames,
+                roi2_min_variance=roi2_min_variance,
+                fallback_enabled=fallback_enabled,
+                max_peak_width=max_peak_width,
+                data_quality_conf=data_quality_conf,
+                hybrid_conf=hybrid_conf,
+                g1_g2_override_enabled=g1_g2_override_enabled,
+                g1_threshold=g1_threshold,
+                g2_threshold=g2_threshold,
+                use_peak_max_g1_g2=use_peak_max_g1_g2,
+            ),
+            video=VideoState(
+                processing_mode=processing_mode,
+                video_cap=video_cap,
+                video_files=list(video_files) if video_files else [],
+                current_video_index=int(current_video_index),
+                video_fps=float(video_fps),
+                video_frame_step=int(video_frame_step),
+                first_video_frame=bool(first_video_frame),
+                effective_frame_rate=float(effective_frame_rate),
+                interval_seconds=float(interval_seconds),
+            ),
+            paths=Paths(
+                base_dir=BASE_DIR,
+                tmp_root=str(tmp_root),
+                roi1_dir=str(roi1_dir),
+                roi2_dir=str(roi2_dir),
+                roi3_dir=str(roi3_dir),
+                wave_dir=str(wave_dir),
+                wave1_dir=str(wave1_dir),
+            ),
+            buffers=Buffers(
+                gray_buffer=gray_buffer,
+                roi1_gray_buffer=roi1_gray_buffer,
+                roi3_gray_buffer=roi3_gray_buffer,
+                roi3_80_160_buffer=roi3_80_160_buffer,
+                roi3_g1_buffer=roi3_g1_buffer,
+                roi3_g2_buffer=roi3_g2_buffer,
+                roi3_column_diff_buffer=roi3_column_diff_buffer,
+            ),
+            thr=ThresholdState(
+                bg_count=int(bg_count),
+                bg_mean=float(bg_mean),
+                frames_since_protection_end=int(frames_since_protection_end),
+                threshold_protection_active=bool(threshold_protection_active),
+                protection_end_time=float(protection_end_time),
+                consecutive_below_threshold=int(consecutive_below_threshold),
+                last_waveform_time=float(last_waveform_time),
+            ),
+            roi1_thr=Roi1ThresholdState(
+                bg_count=int(roi1_bg_count),
+                bg_mean=float(roi1_bg_mean),
+                threshold_protection_active=bool(roi1_threshold_protection_active),
+                protection_end_time=float(roi1_protection_end_time),
+                consecutive_below_threshold=int(roi1_consecutive_below_threshold),
+                last_waveform_time=float(roi1_last_waveform_time),
+                threshold_used=float(roi1_threshold_used),
+            ),
+            managers=Managers(
+                statistics_manager=statistics_manager,
+                analysis_cache=analysis_cache,
+                intersection_manager=intersection_manager,
+                intersection_filter=intersection_filter,
+                anti_jitter_config=anti_jitter_config,
+                logger=logger,
+            ),
+            state=RuntimeState(
+                frame_index=int(frame_index),
+                last_intersection_roi=last_intersection_roi,
+                processed_roi1_peaks=processed_roi1_peaks,
+                roi1_peak_counter=int(roi1_peak_counter),
+            ),
+        )
+
         while True:
             loop_start = time.time()
             ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -635,6 +767,42 @@ def run_daemon() -> None:
                                 frame_index = 0
                                 first_video_frame = True
 
+                                # Keep ctx in sync after switching videos
+                                ctx.state.frame_index = int(frame_index)
+                                ctx.state.last_intersection_roi = last_intersection_roi
+                                ctx.state.processed_roi1_peaks = processed_roi1_peaks
+                                ctx.state.roi1_peak_counter = int(roi1_peak_counter)
+
+                                ctx.thr.bg_count = int(bg_count)
+                                ctx.thr.bg_mean = float(bg_mean)
+                                ctx.thr.frames_since_protection_end = int(frames_since_protection_end)
+                                ctx.thr.threshold_protection_active = bool(threshold_protection_active)
+                                ctx.thr.protection_end_time = float(protection_end_time)
+                                ctx.thr.consecutive_below_threshold = int(consecutive_below_threshold)
+                                ctx.thr.last_waveform_time = float(last_waveform_time)
+
+                                ctx.roi1_thr.bg_count = int(roi1_bg_count)
+                                ctx.roi1_thr.bg_mean = float(roi1_bg_mean)
+                                ctx.roi1_thr.threshold_protection_active = bool(roi1_threshold_protection_active)
+                                ctx.roi1_thr.protection_end_time = float(roi1_protection_end_time)
+                                ctx.roi1_thr.consecutive_below_threshold = int(roi1_consecutive_below_threshold)
+                                ctx.roi1_thr.last_waveform_time = float(roi1_last_waveform_time)
+                                ctx.roi1_thr.threshold_used = float(roi1_threshold_used)
+
+                                ctx.video.video_cap = video_cap
+                                ctx.video.current_video_index = int(current_video_index)
+                                ctx.video.video_fps = float(video_fps)
+                                ctx.video.video_frame_step = int(video_frame_step)
+                                ctx.video.first_video_frame = bool(first_video_frame)
+                                ctx.video.effective_frame_rate = float(effective_frame_rate)
+
+                                ctx.paths.tmp_root = tmp_root
+                                ctx.paths.roi1_dir = roi1_dir
+                                ctx.paths.roi2_dir = roi2_dir
+                                ctx.paths.roi3_dir = roi3_dir
+                                ctx.paths.wave_dir = wave_dir
+                                ctx.paths.wave1_dir = wave1_dir
+
                                 # Start a new cache session for the new video/statistics session
                                 try:
                                     analysis_cache.start_session(
@@ -705,382 +873,33 @@ def run_daemon() -> None:
                     except Exception:
                         video_seconds = None
 
-                # 2. Get ROI1 region and crop
-                x1, y1, x2, y2 = adjust_roi1_to_screen(
-                    (screen_width, screen_height),
-                    roi_default,
+                # Sync live locals into ctx (ctx is the source-of-truth for frame processing)
+                ctx.state.frame_index = frame_index
+                ctx.video.processing_mode = processing_mode
+                ctx.video.video_cap = video_cap
+                ctx.video.current_video_index = current_video_index
+                ctx.video.video_fps = video_fps
+                ctx.video.video_frame_step = video_frame_step
+                ctx.video.first_video_frame = first_video_frame
+                ctx.video.effective_frame_rate = effective_frame_rate
+                ctx.video.interval_seconds = interval_seconds
+                ctx.paths.tmp_root = tmp_root
+                ctx.paths.roi1_dir = roi1_dir
+                ctx.paths.roi2_dir = roi2_dir
+                ctx.paths.roi3_dir = roi3_dir
+                ctx.paths.wave_dir = wave_dir
+                ctx.paths.wave1_dir = wave1_dir
+
+                step_result = process_frame(
+                    ctx=ctx,
+                    screen=screen,
+                    screen_width=screen_width,
+                    screen_height=screen_height,
+                    loop_start=loop_start,
+                    ts=ts,
+                    video_seconds=video_seconds,
                 )
-                roi1_image = screen.crop((x1, y1, x2, y2))
-                roi1_width, roi1_height = roi1_image.size
-
-                # Initialize ROI3 statistics variables
-                roi3_g1: Optional[float] = None
-                roi3_g2: Optional[float] = None
-
-                # 3. Detect green line intersection in ROI1
-                intersection, (center_x, center_y) = intersection_manager.detect_and_get_center(
-                    roi1_image=roi1_image,
-                    anti_jitter_config=anti_jitter_config,
-                    intersection_filter=intersection_filter,
-                )
-                last_intersection_roi = intersection_manager.last_intersection_roi
-
-                # 4. Compute ROI2 region and crop
-                roi2_region = compute_roi2_region(
-                    (roi1_width, roi1_height),
-                    (center_x, center_y),
-                    extension_params,
-                )
-
-                roi2_gray: Optional[float] = None
-                roi2_image: Optional[Image.Image] = None
-
-                if roi2_region is not None:
-                    rx1, ry1, rx2, ry2 = roi2_region
-                    roi2_image = roi1_image.crop((rx1, ry1, rx2, ry2))
-                    roi2_gray = compute_average_gray(roi2_image)
-                    gray_buffer.append(roi2_gray)
-
-                    # ROI3 extraction (independent from ROI2)
-                    roi3_gray: Optional[float] = None
-                    roi3_image: Optional[Image.Image] = None
-                    if roi3_extension_params:
-                        roi3_region = compute_roi2_region(
-                            (roi1_width, roi1_height),
-                            (center_x, center_y),
-                            roi3_extension_params,
-                        )
-                        if roi3_region is not None:
-                            r3x1, r3y1, r3x2, r3y2 = roi3_region
-                            roi3_image = roi1_image.crop((r3x1, r3y1, r3x2, r3y2))
-                            roi3_gray = compute_average_gray(roi3_image)
-                            roi3_gray_buffer.append(roi3_gray)
-                            print(f"[DEBUG] ROI3 captured: frame={frame_index}, gray={roi3_gray:.2f}, buffer_len={len(roi3_gray_buffer)}")
-                            print(f"[DEBUG] ROI3 coords: ({r3x1}, {r3y1}, {r3x2}, {r3y2}), size={r3x2-r3x1}x{r3y2-r3y1}, center=({center_x}, {center_y})")
-
-                            # Compute normalized pixel count for range [80, 160]
-                            roi3_80_160_normalized = compute_roi3_80_160_normalized(roi3_image)
-                            roi3_80_160_buffer.append(roi3_80_160_normalized)
-                            print(f"[DEBUG] ROI3(80-160)%: frame={frame_index}, percentage={roi3_80_160_normalized:.2f}%, buffer_len={len(roi3_80_160_buffer)}")
-
-                            # Compute G1 and G2 ranges
-                            g1, g2 = compute_roi3_g1_g2_ranges(roi3_image)
-                            roi3_g1 = g1  # Save for cache recording
-                            roi3_g2 = g2  # Save for cache recording
-                            roi3_g1_buffer.append(g1)  # 存入G1缓冲区
-                            roi3_g2_buffer.append(g2)  # 存入G2缓冲区
-                            msg = f"[STAT] 帧{frame_index} G1(80-255)={g1:.2f}%, G2(150-255)={g2:.2f}%"
-                            logging.debug(msg)
-                            print(msg)
-
-                            # 计算ROI3列灰度差值
-                            roi3_column_diff = compute_roi3_column_mean_diff(roi3_image)
-                            roi3_column_diff_buffer.append(roi3_column_diff)
-                            msg = f"[STAT] 帧{frame_index} ROI3列灰度差值: {roi3_column_diff:.2f}"
-                            logging.debug(msg)
-                            print(msg)
-                        else:
-                            print(f"[DEBUG] ROI3 extraction failed: frame={frame_index}, intersection={intersection}, roi3_extension_params={roi3_extension_params}")
-                    else:
-                        print(f"[DEBUG] ROI3 extension params not available")
-
-                    # ROI1 gray value calculation (independent from ROI2)
-                    roi1_gray: Optional[float] = None
-                    if roi1_enabled:
-                        roi1_gray = compute_average_gray(roi1_image)
-                        roi1_gray_buffer.append(roi1_gray)
-
-                # 5. Run peak detection on current gray buffer
-                green_peaks: List[Tuple[int, int]] = []
-                red_peaks: List[Tuple[int, int]] = []
-                green_peaks_raw: List[Tuple[int, int]] = []
-                red_peaks_raw: List[Tuple[int, int]] = []
-                (
-                    threshold_used,
-                    recent_frames_count,
-                    calculated_bg_mean,
-                    bg_mean,
-                    bg_count,
-                    threshold_protection_active,
-                    protection_end_time,
-                    consecutive_below_threshold,
-                    frames_since_protection_end,
-                    last_waveform_time,
-                ) = update_roi2_threshold_state(
-                    gray_buffer=gray_buffer,
-                    adaptive_threshold_enabled=adaptive_threshold_enabled,
-                    adaptive_window_frames=adaptive_window_frames,
-                    threshold=threshold,
-                    threshold_minimum=threshold_minimum,
-                    threshold_over_mean_ratio=threshold_over_mean_ratio,
-                    roi2_gray=roi2_gray,
-                    frame_index=frame_index,
-                    protection_enabled=protection_enabled,
-                    recovery_delay_frames=recovery_delay_frames,
-                    stability_frames=stability_frames,
-                    waveform_trigger_enabled=waveform_trigger_enabled,
-                    threshold_protection_active=threshold_protection_active,
-                    protection_end_time=protection_end_time,
-                    consecutive_below_threshold=consecutive_below_threshold,
-                    frames_since_protection_end=frames_since_protection_end,
-                    last_waveform_time=last_waveform_time,
-                    bg_mean=bg_mean,
-                    bg_count=bg_count,
-                 )
-
-                (detection_mode,
-                 hybrid_peaks,
-                 green_peaks_raw,
-                 red_peaks_raw,
-                 green_peaks,
-                 red_peaks,
-                ) = run_peak_detection_step(
-                    frame_index=frame_index,
-                    hybrid_enabled=hybrid_enabled,
-                    roi1_enabled=roi1_enabled,
-                    roi1_gray_buffer=roi1_gray_buffer,
-                    gray_buffer=gray_buffer,
-                    roi1_threshold_used=roi1_threshold_used,
-                    roi1_margin_frames=roi1_margin_frames,
-                    roi1_silence_frames=roi1_silence_frames,
-                    roi1_pre_post_avg_frames=roi1_pre_post_avg_frames,
-                    roi1_min_region_length=roi1_min_region_length,
-                    max_peak_width=max_peak_width,
-                    roi2_pre_frames=roi2_pre_frames,
-                    roi2_post_frames=roi2_post_frames,
-                    min_roi2_frames=min_roi2_frames,
-                    roi2_min_variance=roi2_min_variance,
-                    diff_threshold=diff_threshold,
-                    fallback_enabled=fallback_enabled,
-                    hybrid_conf=hybrid_conf,
-                    data_quality_conf=data_quality_conf,
-                    intersection=intersection,
-                    g1_g2_override_enabled=g1_g2_override_enabled,
-                    g1_threshold=g1_threshold,
-                    g2_threshold=g2_threshold,
-                    use_peak_max_g1_g2=use_peak_max_g1_g2,
-                    roi3_g1_buffer=roi3_g1_buffer,
-                    roi3_g2_buffer=roi3_g2_buffer,
-                    roi3_column_diff_buffer=roi3_column_diff_buffer,
-                    processed_roi1_peaks=processed_roi1_peaks,
-                    roi1_peak_counter=roi1_peak_counter,
-                    threshold_used=threshold_used,
-                    margin_frames=margin_frames,
-                    silence_frames=silence_frames,
-                    pre_post_avg_frames=pre_post_avg_frames,
-                    min_region_length=min_region_length,
-                )
-
-                # Re-check threshold protection with actual peak detection results
-                if protection_enabled and roi2_gray is not None:
-                    has_peaks = len(green_peaks) > 0 or len(red_peaks) > 0
-                    current_time = time.time()
-
-                    (threshold_protection_active, protection_end_time,
-                     consecutive_below_threshold, frames_since_protection_end,
-                     last_waveform_time) = manage_threshold_protection(
-                        current_gray=roi2_gray,
-                        current_threshold=threshold_used,
-                        has_peaks=has_peaks,
-                        frame_time=current_time,
-                        frame_index=frame_index,
-                        protection_active=threshold_protection_active,
-                        protection_end_time=protection_end_time,
-                        consecutive_below=consecutive_below_threshold,
-                        last_waveform_time=last_waveform_time,
-                        enabled=protection_enabled,
-                        recovery_delay_frames=recovery_delay_frames,
-                        stability_frames=stability_frames,
-                        waveform_trigger=waveform_trigger_enabled,
-                        threshold_minimum=threshold_minimum,
-                    )
-
-                  
-                # ROI1 adaptive threshold calculation (independent from ROI2)
-                roi1_threshold_used = max(roi1_threshold, roi1_threshold_minimum)
-                roi1_curve = list(roi1_gray_buffer) if roi1_gray_buffer else []
-                roi1_threshold_used, roi1_bg_mean, roi1_bg_count = update_roi1_threshold_state(
-                    roi1_enabled=roi1_enabled,
-                    roi1_gray_buffer=roi1_gray_buffer,
-                    roi1_gray=roi1_gray,
-                    frame_index=frame_index,
-                    effective_frame_rate=effective_frame_rate,
-                    roi1_threshold=roi1_threshold,
-                    roi1_threshold_minimum=roi1_threshold_minimum,
-                    roi1_threshold_over_mean_ratio=roi1_threshold_over_mean_ratio,
-                    roi1_adaptive_threshold_enabled=roi1_adaptive_threshold_enabled,
-                    roi1_adaptive_window_seconds=roi1_adaptive_window_seconds,
-                    roi1_threshold_protection_active=roi1_threshold_protection_active,
-                    roi1_bg_mean=roi1_bg_mean,
-                    roi1_bg_count=roi1_bg_count,
-                )
-
-                green_count = len(green_peaks)
-                red_count = len(red_peaks)
-                last_green = green_peaks[-1] if green_peaks else None
-                last_green_repr = (
-                    f"[{last_green[0]},{last_green[1]}]" if last_green else "[]"
-                )
-
-                gray_str = (
-                    f"{roi2_gray:.1f}" if roi2_gray is not None else "nan"
-                )
-
-                # Add peaks to statistics for Excel data collection (task requirement)
-                stats_write_results = add_peaks_to_statistics(
-                    statistics_manager=statistics_manager,
-                    frame_index=frame_index,
-                    green_peaks=green_peaks,
-                    red_peaks=red_peaks,
-                    gray_buffer=gray_buffer,
-                    last_intersection_roi=last_intersection_roi,
-                    roi2_region=roi2_region,
-                    roi2_gray=roi2_gray,
-                    diff_threshold=diff_threshold,
-                    pre_post_avg_frames=pre_post_avg_frames,
-                    threshold_used=threshold_used,
-                    bg_mean=bg_mean,
-                    bg_count=bg_count,
-                    hybrid_enabled=hybrid_enabled,
-                    hybrid_peaks=hybrid_peaks,
-                    roi1_gray_buffer=roi1_gray_buffer,
-                    roi1_threshold_used=roi1_threshold_used,
-                    roi3_gray_buffer=roi3_gray_buffer,
-                )
-
-                # Decide whether to save images/wave for this frame
-                has_peak = (green_count > 0) or (red_count > 0)
-                should_save = (not only_delect) or has_peak
-
-                # For ROI1, save waveforms when data is available (independent of ROI2 peaks)
-                roi1_should_save = (not only_delect) or (len(roi1_gray_buffer) > 0)
-
-                # Write a per-frame cache record for later Q&A / root cause analysis
-                try:
-                    buffer_len = len(gray_buffer)
-                    buffer_start_frame = max(0, frame_index - buffer_len + 1)
-
-                    def _peaks_to_abs(peaks: List[Tuple[int, int]]) -> List[Dict[str, int]]:
-                        out: List[Dict[str, int]] = []
-                        for s, e in peaks:
-                            out.append(
-                                {
-                                    "buffer_start": int(s),
-                                    "buffer_end": int(e),
-                                    "abs_start": int(buffer_start_frame + s),
-                                    "abs_end": int(buffer_start_frame + e),
-                                }
-                            )
-                        return out
-
-                    analysis_cache.record_frame(
-                        {
-                            "ts_wall": loop_start,
-                            "ts_local": ts,
-                            "frame_index": int(frame_index),
-                            "video_seconds": video_seconds,
-                            "screen_size": [int(screen_width), int(screen_height)],
-                            "roi1": {"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)},
-                            "intersection": {"current": intersection, "used": last_intersection_roi},
-                            "roi2_region": roi2_region,
-                            "roi2_gray": roi2_gray,
-                            "roi3": {
-                                "g1": float(roi3_g1) if roi3_g1 is not None else None,
-                                "g2": float(roi3_g2) if roi3_g2 is not None else None,
-                                "gray": float(roi3_gray) if roi3_gray is not None else None,
-                                "column_diff": float(roi3_column_diff) if roi3_column_diff is not None else None,
-                            },
-                            "buffer": {
-                                "len": int(buffer_len),
-                                "start_frame_index": int(buffer_start_frame),
-                                "maxlen": 100,
-                            },
-                            "threshold": {
-                                "fixed": float(threshold),
-                                "minimum": float(threshold_minimum),
-                                "used": float(threshold_used),
-                                "adaptive_enabled": bool(adaptive_threshold_enabled),
-                                "adaptive_window_frames": int(adaptive_window_frames),
-                                "recent_frames_count": recent_frames_count,
-                                "calculated_bg_mean": calculated_bg_mean,
-                                "bg_mean": (float(bg_mean) if bg_count > 0 else None),
-                                "bg_count": int(bg_count),
-                                "protection_active": bool(threshold_protection_active),
-                                "consecutive_below_threshold": int(consecutive_below_threshold),
-                                "frames_since_protection_end": int(frames_since_protection_end),
-                            },
-                            "detect_params": {
-                                "margin_frames": int(margin_frames),
-                                "silence_frames": int(silence_frames),
-                                "difference_threshold": float(diff_threshold),
-                                "pre_post_avg_frames": int(pre_post_avg_frames),
-                                "min_region_length": int(min_region_length),
-                            },
-                            "detection": {
-                                "mode": str(detection_mode),
-                                "hybrid_enabled": bool(hybrid_enabled),
-                                "roi1_enabled": bool(roi1_enabled),
-                            },
-                            "peaks": {
-                                "green_raw": _peaks_to_abs(green_peaks_raw),
-                                "red_raw": _peaks_to_abs(red_peaks_raw),
-                                "green": _peaks_to_abs(green_peaks),
-                                "red": _peaks_to_abs(red_peaks),
-                            },
-                            "stats_write": stats_write_results,
-                        }
-                    )
-                except Exception:
-                    pass
-
-                save_frame_artifacts(
-                    frame_index=frame_index,
-                    should_save=should_save,
-                    roi1_should_save=roi1_should_save,
-                    save_roi1=save_roi1,
-                    save_roi2=save_roi2,
-                    save_roi3=save_roi3,
-                    save_wave=save_wave,
-                    save_roi1_wave=save_roi1_wave,
-                    roi1_enabled=roi1_enabled,
-                    processing_mode=processing_mode,
-                    video_cap=video_cap,
-                    roi1_dir=roi1_dir,
-                    roi2_dir=roi2_dir,
-                    roi3_dir=roi3_dir,
-                    wave_dir=wave_dir,
-                    wave1_dir=wave1_dir,
-                    roi1_image=roi1_image,
-                    roi2_image=roi2_image,
-                    roi3_image=roi3_image,
-                    roi2_region=roi2_region,
-                    gray_buffer=gray_buffer,
-                    roi3_gray_buffer=roi3_gray_buffer,
-                    roi3_80_160_buffer=roi3_80_160_buffer,
-                    green_peaks=green_peaks,
-                    red_peaks=red_peaks,
-                    bg_count=bg_count,
-                    bg_mean=bg_mean,
-                    adaptive_window_frames=adaptive_window_frames,
-                    adaptive_threshold_enabled=adaptive_threshold_enabled,
-                    threshold_protection_active=threshold_protection_active,
-                    threshold_used=threshold_used,
-                    roi1_curve=roi1_curve,
-                    roi1_bg_count=roi1_bg_count,
-                    roi1_bg_mean=roi1_bg_mean,
-                    roi1_threshold_protection_active=roi1_threshold_protection_active,
-                    roi1_threshold_used=roi1_threshold_used,
-                )
-
-            # Build log line; when only_delect is True, only log frames with peaks
-                if (not only_delect) or has_peak:
-                    log_line = (
-                        f"{ts} gray={gray_str} "
-                        f"green_peaks={green_count} red_peaks={red_count} "
-                        f"last_green={last_green_repr}"
-                    )
-                else:
-                    log_line = None
+                log_line = step_result.log_line
             except KeyboardInterrupt:
                 logger.info(f"{ts} INFO=daemon_stopped_by_user")
                 break
