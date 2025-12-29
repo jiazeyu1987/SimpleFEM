@@ -15,34 +15,21 @@ import json
 import logging
 import logging.handlers
 import os
-import platform
 import sys
 import time
-import uuid
 from collections import deque
 from datetime import datetime
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-import numpy as np
-from PIL import Image
 import cv2
-import matplotlib.pyplot as plt
-import glob
 
 from fem_refactor.analysis_cache import RoiAnalysisCache
 from fem_refactor.anti_jitter_manager import AntiJitterManager
 from fem_refactor.cleanup_manager import cleanup_directories
 from fem_refactor.config_loader import load_fem_config
-from fem_refactor.image_metrics import (
-    compute_average_gray,
-    compute_roi3_80_160_normalized,
-    compute_roi3_column_mean_diff,
-    compute_roi3_g1_g2_ranges,
-)
 from fem_refactor.logging_manager import setup_logging, setup_peak_logger
 from fem_refactor.paths import get_base_dir
 from fem_refactor.processing_mode_manager import initialize_processing_mode
-from fem_refactor.roi_math import adjust_roi1_to_screen, compute_roi2_region
 from fem_refactor.screen_source import capture_screen
 from fem_refactor.intersection_manager import IntersectionManager
 from fem_refactor.video_source import (
@@ -51,9 +38,6 @@ from fem_refactor.video_source import (
     get_video_frame,
     initialize_video_capture,
 )
-from fem_refactor.detection_pipeline import run_peak_detection_step
-from fem_refactor.artifact_saver import save_frame_artifacts
-from fem_refactor.stats_sink import add_peaks_to_statistics
 from fem_refactor.frame_step import process_frame
 from fem_refactor.models import (
     Buffers,
@@ -66,6 +50,124 @@ from fem_refactor.models import (
     ThresholdState,
     VideoState,
 )
+
+
+def _get_video_seconds(*, processing_mode: str, video_cap: Any) -> Optional[float]:
+    if processing_mode != "video" or video_cap is None:
+        return None
+    try:
+        video_pos_msec = float(video_cap.get(cv2.CAP_PROP_POS_MSEC))
+        if video_pos_msec >= 0:
+            return video_pos_msec / 1000.0
+    except Exception:
+        return None
+    return None
+
+
+def _sync_ctx_for_frame(
+    *,
+    ctx: DaemonContext,
+    frame_index: int,
+    processing_mode: str,
+    video_cap: Any,
+    current_video_index: int,
+    video_fps: float,
+    video_frame_step: int,
+    first_video_frame: bool,
+    effective_frame_rate: float,
+    interval_seconds: float,
+    tmp_root: str,
+    roi1_dir: str,
+    roi2_dir: str,
+    roi3_dir: str,
+    wave_dir: str,
+    wave1_dir: str,
+) -> None:
+    ctx.state.frame_index = frame_index
+    ctx.video.processing_mode = processing_mode
+    ctx.video.video_cap = video_cap
+    ctx.video.current_video_index = current_video_index
+    ctx.video.video_fps = video_fps
+    ctx.video.video_frame_step = video_frame_step
+    ctx.video.first_video_frame = first_video_frame
+    ctx.video.effective_frame_rate = effective_frame_rate
+    ctx.video.interval_seconds = interval_seconds
+    ctx.paths.tmp_root = tmp_root
+    ctx.paths.roi1_dir = roi1_dir
+    ctx.paths.roi2_dir = roi2_dir
+    ctx.paths.roi3_dir = roi3_dir
+    ctx.paths.wave_dir = wave_dir
+    ctx.paths.wave1_dir = wave1_dir
+
+
+def _sync_ctx_after_video_switch(
+    *,
+    ctx: DaemonContext,
+    frame_index: int,
+    last_intersection_roi: Optional[Tuple[int, int]],
+    processed_roi1_peaks: Dict[Any, Any],
+    roi1_peak_counter: int,
+    bg_count: int,
+    bg_mean: float,
+    frames_since_protection_end: int,
+    threshold_protection_active: bool,
+    protection_end_time: float,
+    consecutive_below_threshold: int,
+    last_waveform_time: float,
+    roi1_bg_count: int,
+    roi1_bg_mean: float,
+    roi1_threshold_protection_active: bool,
+    roi1_protection_end_time: float,
+    roi1_consecutive_below_threshold: int,
+    roi1_last_waveform_time: float,
+    roi1_threshold_used: float,
+    video_cap: Any,
+    current_video_index: int,
+    video_fps: float,
+    video_frame_step: int,
+    first_video_frame: bool,
+    effective_frame_rate: float,
+    tmp_root: str,
+    roi1_dir: str,
+    roi2_dir: str,
+    roi3_dir: str,
+    wave_dir: str,
+    wave1_dir: str,
+) -> None:
+    ctx.state.frame_index = int(frame_index)
+    ctx.state.last_intersection_roi = last_intersection_roi
+    ctx.state.processed_roi1_peaks = processed_roi1_peaks
+    ctx.state.roi1_peak_counter = int(roi1_peak_counter)
+
+    ctx.thr.bg_count = int(bg_count)
+    ctx.thr.bg_mean = float(bg_mean)
+    ctx.thr.frames_since_protection_end = int(frames_since_protection_end)
+    ctx.thr.threshold_protection_active = bool(threshold_protection_active)
+    ctx.thr.protection_end_time = float(protection_end_time)
+    ctx.thr.consecutive_below_threshold = int(consecutive_below_threshold)
+    ctx.thr.last_waveform_time = float(last_waveform_time)
+
+    ctx.roi1_thr.bg_count = int(roi1_bg_count)
+    ctx.roi1_thr.bg_mean = float(roi1_bg_mean)
+    ctx.roi1_thr.threshold_protection_active = bool(roi1_threshold_protection_active)
+    ctx.roi1_thr.protection_end_time = float(roi1_protection_end_time)
+    ctx.roi1_thr.consecutive_below_threshold = int(roi1_consecutive_below_threshold)
+    ctx.roi1_thr.last_waveform_time = float(roi1_last_waveform_time)
+    ctx.roi1_thr.threshold_used = float(roi1_threshold_used)
+
+    ctx.video.video_cap = video_cap
+    ctx.video.current_video_index = int(current_video_index)
+    ctx.video.video_fps = float(video_fps)
+    ctx.video.video_frame_step = int(video_frame_step)
+    ctx.video.first_video_frame = bool(first_video_frame)
+    ctx.video.effective_frame_rate = float(effective_frame_rate)
+
+    ctx.paths.tmp_root = tmp_root
+    ctx.paths.roi1_dir = roi1_dir
+    ctx.paths.roi2_dir = roi2_dir
+    ctx.paths.roi3_dir = roi3_dir
+    ctx.paths.wave_dir = wave_dir
+    ctx.paths.wave1_dir = wave1_dir
 from fem_refactor.threshold_manager import update_roi1_threshold_state, update_roi2_threshold_state
 from fem_refactor.threshold_protection import manage_threshold_protection
 from fem_refactor.signal_buffers import (
@@ -768,40 +870,39 @@ def run_daemon() -> None:
                                 first_video_frame = True
 
                                 # Keep ctx in sync after switching videos
-                                ctx.state.frame_index = int(frame_index)
-                                ctx.state.last_intersection_roi = last_intersection_roi
-                                ctx.state.processed_roi1_peaks = processed_roi1_peaks
-                                ctx.state.roi1_peak_counter = int(roi1_peak_counter)
-
-                                ctx.thr.bg_count = int(bg_count)
-                                ctx.thr.bg_mean = float(bg_mean)
-                                ctx.thr.frames_since_protection_end = int(frames_since_protection_end)
-                                ctx.thr.threshold_protection_active = bool(threshold_protection_active)
-                                ctx.thr.protection_end_time = float(protection_end_time)
-                                ctx.thr.consecutive_below_threshold = int(consecutive_below_threshold)
-                                ctx.thr.last_waveform_time = float(last_waveform_time)
-
-                                ctx.roi1_thr.bg_count = int(roi1_bg_count)
-                                ctx.roi1_thr.bg_mean = float(roi1_bg_mean)
-                                ctx.roi1_thr.threshold_protection_active = bool(roi1_threshold_protection_active)
-                                ctx.roi1_thr.protection_end_time = float(roi1_protection_end_time)
-                                ctx.roi1_thr.consecutive_below_threshold = int(roi1_consecutive_below_threshold)
-                                ctx.roi1_thr.last_waveform_time = float(roi1_last_waveform_time)
-                                ctx.roi1_thr.threshold_used = float(roi1_threshold_used)
-
-                                ctx.video.video_cap = video_cap
-                                ctx.video.current_video_index = int(current_video_index)
-                                ctx.video.video_fps = float(video_fps)
-                                ctx.video.video_frame_step = int(video_frame_step)
-                                ctx.video.first_video_frame = bool(first_video_frame)
-                                ctx.video.effective_frame_rate = float(effective_frame_rate)
-
-                                ctx.paths.tmp_root = tmp_root
-                                ctx.paths.roi1_dir = roi1_dir
-                                ctx.paths.roi2_dir = roi2_dir
-                                ctx.paths.roi3_dir = roi3_dir
-                                ctx.paths.wave_dir = wave_dir
-                                ctx.paths.wave1_dir = wave1_dir
+                                _sync_ctx_after_video_switch(
+                                    ctx=ctx,
+                                    frame_index=frame_index,
+                                    last_intersection_roi=last_intersection_roi,
+                                    processed_roi1_peaks=processed_roi1_peaks,
+                                    roi1_peak_counter=roi1_peak_counter,
+                                    bg_count=bg_count,
+                                    bg_mean=bg_mean,
+                                    frames_since_protection_end=frames_since_protection_end,
+                                    threshold_protection_active=threshold_protection_active,
+                                    protection_end_time=protection_end_time,
+                                    consecutive_below_threshold=consecutive_below_threshold,
+                                    last_waveform_time=last_waveform_time,
+                                    roi1_bg_count=roi1_bg_count,
+                                    roi1_bg_mean=roi1_bg_mean,
+                                    roi1_threshold_protection_active=roi1_threshold_protection_active,
+                                    roi1_protection_end_time=roi1_protection_end_time,
+                                    roi1_consecutive_below_threshold=roi1_consecutive_below_threshold,
+                                    roi1_last_waveform_time=roi1_last_waveform_time,
+                                    roi1_threshold_used=roi1_threshold_used,
+                                    video_cap=video_cap,
+                                    current_video_index=current_video_index,
+                                    video_fps=video_fps,
+                                    video_frame_step=video_frame_step,
+                                    first_video_frame=first_video_frame,
+                                    effective_frame_rate=effective_frame_rate,
+                                    tmp_root=tmp_root,
+                                    roi1_dir=roi1_dir,
+                                    roi2_dir=roi2_dir,
+                                    roi3_dir=roi3_dir,
+                                    wave_dir=wave_dir,
+                                    wave1_dir=wave1_dir,
+                                )
 
                                 # Start a new cache session for the new video/statistics session
                                 try:
@@ -864,31 +965,27 @@ def run_daemon() -> None:
                     screen = capture_screen()
                     screen_width, screen_height = screen.size
 
-                video_seconds: Optional[float] = None
-                if processing_mode == "video" and video_cap is not None:
-                    try:
-                        video_pos_msec = float(video_cap.get(cv2.CAP_PROP_POS_MSEC))
-                        if video_pos_msec >= 0:
-                            video_seconds = video_pos_msec / 1000.0
-                    except Exception:
-                        video_seconds = None
+                video_seconds = _get_video_seconds(processing_mode=processing_mode, video_cap=video_cap)
 
                 # Sync live locals into ctx (ctx is the source-of-truth for frame processing)
-                ctx.state.frame_index = frame_index
-                ctx.video.processing_mode = processing_mode
-                ctx.video.video_cap = video_cap
-                ctx.video.current_video_index = current_video_index
-                ctx.video.video_fps = video_fps
-                ctx.video.video_frame_step = video_frame_step
-                ctx.video.first_video_frame = first_video_frame
-                ctx.video.effective_frame_rate = effective_frame_rate
-                ctx.video.interval_seconds = interval_seconds
-                ctx.paths.tmp_root = tmp_root
-                ctx.paths.roi1_dir = roi1_dir
-                ctx.paths.roi2_dir = roi2_dir
-                ctx.paths.roi3_dir = roi3_dir
-                ctx.paths.wave_dir = wave_dir
-                ctx.paths.wave1_dir = wave1_dir
+                _sync_ctx_for_frame(
+                    ctx=ctx,
+                    frame_index=frame_index,
+                    processing_mode=processing_mode,
+                    video_cap=video_cap,
+                    current_video_index=current_video_index,
+                    video_fps=video_fps,
+                    video_frame_step=video_frame_step,
+                    first_video_frame=first_video_frame,
+                    effective_frame_rate=effective_frame_rate,
+                    interval_seconds=interval_seconds,
+                    tmp_root=tmp_root,
+                    roi1_dir=roi1_dir,
+                    roi2_dir=roi2_dir,
+                    roi3_dir=roi3_dir,
+                    wave_dir=wave_dir,
+                    wave1_dir=wave1_dir,
+                )
 
                 step_result = process_frame(
                     ctx=ctx,
