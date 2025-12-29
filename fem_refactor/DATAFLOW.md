@@ -113,6 +113,8 @@
 
 存在两条检测路径，取决于 `hybrid_detection.enabled` 与 ROI1 数据质量等条件：
 
+> 实现位置：`fem_refactor/detection_pipeline.py`（`run_peak_detection_step()` / `hybrid_peak_detection()`）。
+
 ### 6.1 混合检测（ROI1 peaks + ROI2 color）
 1) ROI1 曲线做波峰检测（调用 `detect_peaks` 或其包装）
 2) 对每个 ROI1 peak 区间，在 ROI2 曲线同一区间上计算 `pre/post avg` 与差值

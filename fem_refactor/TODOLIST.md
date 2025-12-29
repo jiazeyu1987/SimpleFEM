@@ -49,7 +49,7 @@
 - `threshold.used/bg_mean/bg_count/protection_active` 的时间序列一致（可通过 cache jsonl 对比）。
 
 ### 6) 检测管线（高风险，最后做）
-- [ ] `detection_pipeline.py`：
+- [x] `detection_pipeline.py`：
   - 混合检测：`hybrid_peak_detection(roi1_peaks -> roi2_color)`
   - 传统检测：`detect_peaks(roi2_curve)`
   - fallback 条件、data_quality 检查、min_region_length 过滤（保持顺序）
