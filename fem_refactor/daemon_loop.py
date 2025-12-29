@@ -32,12 +32,7 @@ from fem_refactor.paths import get_base_dir
 from fem_refactor.processing_mode_manager import initialize_processing_mode
 from fem_refactor.screen_source import capture_screen
 from fem_refactor.intersection_manager import IntersectionManager
-from fem_refactor.video_source import (
-    discover_video_files,
-    get_video_fps,
-    get_video_frame,
-    initialize_video_capture,
-)
+from fem_refactor.video_source import discover_video_files, get_video_fps, initialize_video_capture
 from fem_refactor.frame_step import process_frame
 from fem_refactor.models import (
     Buffers,
@@ -50,6 +45,7 @@ from fem_refactor.models import (
     ThresholdState,
     VideoState,
 )
+from fem_refactor.video_session_manager import VideoSessionManager
 
 
 def _get_video_seconds(*, processing_mode: str, video_cap: Any) -> Optional[float]:
@@ -98,82 +94,8 @@ def _sync_ctx_for_frame(
     ctx.paths.roi3_dir = roi3_dir
     ctx.paths.wave_dir = wave_dir
     ctx.paths.wave1_dir = wave1_dir
-
-
-def _sync_ctx_after_video_switch(
-    *,
-    ctx: DaemonContext,
-    frame_index: int,
-    last_intersection_roi: Optional[Tuple[int, int]],
-    processed_roi1_peaks: Dict[Any, Any],
-    roi1_peak_counter: int,
-    bg_count: int,
-    bg_mean: float,
-    frames_since_protection_end: int,
-    threshold_protection_active: bool,
-    protection_end_time: float,
-    consecutive_below_threshold: int,
-    last_waveform_time: float,
-    roi1_bg_count: int,
-    roi1_bg_mean: float,
-    roi1_threshold_protection_active: bool,
-    roi1_protection_end_time: float,
-    roi1_consecutive_below_threshold: int,
-    roi1_last_waveform_time: float,
-    roi1_threshold_used: float,
-    video_cap: Any,
-    current_video_index: int,
-    video_fps: float,
-    video_frame_step: int,
-    first_video_frame: bool,
-    effective_frame_rate: float,
-    tmp_root: str,
-    roi1_dir: str,
-    roi2_dir: str,
-    roi3_dir: str,
-    wave_dir: str,
-    wave1_dir: str,
-) -> None:
-    ctx.state.frame_index = int(frame_index)
-    ctx.state.last_intersection_roi = last_intersection_roi
-    ctx.state.processed_roi1_peaks = processed_roi1_peaks
-    ctx.state.roi1_peak_counter = int(roi1_peak_counter)
-
-    ctx.thr.bg_count = int(bg_count)
-    ctx.thr.bg_mean = float(bg_mean)
-    ctx.thr.frames_since_protection_end = int(frames_since_protection_end)
-    ctx.thr.threshold_protection_active = bool(threshold_protection_active)
-    ctx.thr.protection_end_time = float(protection_end_time)
-    ctx.thr.consecutive_below_threshold = int(consecutive_below_threshold)
-    ctx.thr.last_waveform_time = float(last_waveform_time)
-
-    ctx.roi1_thr.bg_count = int(roi1_bg_count)
-    ctx.roi1_thr.bg_mean = float(roi1_bg_mean)
-    ctx.roi1_thr.threshold_protection_active = bool(roi1_threshold_protection_active)
-    ctx.roi1_thr.protection_end_time = float(roi1_protection_end_time)
-    ctx.roi1_thr.consecutive_below_threshold = int(roi1_consecutive_below_threshold)
-    ctx.roi1_thr.last_waveform_time = float(roi1_last_waveform_time)
-    ctx.roi1_thr.threshold_used = float(roi1_threshold_used)
-
-    ctx.video.video_cap = video_cap
-    ctx.video.current_video_index = int(current_video_index)
-    ctx.video.video_fps = float(video_fps)
-    ctx.video.video_frame_step = int(video_frame_step)
-    ctx.video.first_video_frame = bool(first_video_frame)
-    ctx.video.effective_frame_rate = float(effective_frame_rate)
-
-    ctx.paths.tmp_root = tmp_root
-    ctx.paths.roi1_dir = roi1_dir
-    ctx.paths.roi2_dir = roi2_dir
-    ctx.paths.roi3_dir = roi3_dir
-    ctx.paths.wave_dir = wave_dir
-    ctx.paths.wave1_dir = wave1_dir
-from fem_refactor.threshold_manager import update_roi1_threshold_state, update_roi2_threshold_state
-from fem_refactor.threshold_protection import manage_threshold_protection
 from fem_refactor.signal_buffers import (
     create_signal_buffers,
-    reset_roi1_state,
-    reset_video_state_variables,
 )
 def _get_base_dir() -> str:
     """
@@ -201,7 +123,6 @@ def _setup_import_paths() -> None:
 
 _setup_import_paths()
 
-from peak_detection import detect_peaks  # type: ignore  # noqa: E402
 from safe_peak_statistics import SafePeakStatistics  # type: ignore  # noqa: E402
 
 
@@ -741,6 +662,25 @@ def run_daemon() -> None:
             ),
         )
 
+        video_session_manager: Optional[VideoSessionManager] = None
+        if processing_mode == "video":
+            video_session_manager = VideoSessionManager(
+                ctx=ctx,
+                config=config,
+                statistics_manager=statistics_manager,
+                analysis_cache=analysis_cache,
+                create_video_folders=_create_video_folders,
+                intersection_filter=intersection_filter,
+                roi_frame_rate=roi_frame_rate,
+                adaptive_window_frames=adaptive_window_frames,
+                save_roi1=save_roi1,
+                save_roi2=save_roi2,
+                save_roi3=save_roi3,
+                save_wave=save_wave,
+                save_roi1_wave=save_roi1_wave,
+                video_files=list(video_files) if video_files else [],
+            )
+
         while True:
             loop_start = time.time()
             ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -751,215 +691,38 @@ def run_daemon() -> None:
 
                 # 1. Capture image (screen or video frame)
                 if processing_mode == "video":
-                    video_config = config.get("video_processing", {})
-                    loop_enabled = video_config.get("loop_enabled", False)
-                    # First frame uses step=1 to avoid skipping the very beginning.
-                    step = 1 if first_video_frame else video_frame_step
-                    first_video_frame = False
-                    screen = get_video_frame(video_cap, loop_enabled, frame_step=step)
+                    if video_session_manager is None:
+                        raise RuntimeError("video_session_manager is not initialized")
+
+                    capture_result = video_session_manager.capture_next(
+                        loop_start=loop_start,
+                        interval_seconds=interval_seconds,
+                        frame_index=frame_index,
+                    )
+
+                    # Sync locals from ctx (for logging/debug/finally blocks)
+                    video_cap = ctx.video.video_cap
+                    current_video_index = ctx.video.current_video_index
+                    video_fps = ctx.video.video_fps
+                    video_frame_step = ctx.video.video_frame_step
+                    first_video_frame = ctx.video.first_video_frame
+                    effective_frame_rate = ctx.video.effective_frame_rate
+                    tmp_root = ctx.paths.tmp_root
+                    roi1_dir = ctx.paths.roi1_dir
+                    roi2_dir = ctx.paths.roi2_dir
+                    roi3_dir = ctx.paths.roi3_dir
+                    wave_dir = ctx.paths.wave_dir
+                    wave1_dir = ctx.paths.wave1_dir
+                    frame_index = ctx.state.frame_index if capture_result.should_continue else frame_index
+
+                    if capture_result.should_break:
+                        break
+                    if capture_result.should_continue:
+                        continue
+
+                    screen = capture_result.screen
                     if screen is None:
-                        # 当前视频播放结束
-                        current_video_index += 1
-
-                        # 释放当前视频资源
-                        video_cap.release()
-
-                        if current_video_index < len(video_files):
-                            # 切换到下一个视频
-                            next_video_path = video_files[current_video_index]
-                            try:
-                                # 为此视频初始化新的统计
-                                current_stats = statistics_manager.initialize_for_video(
-                                    next_video_path,
-                                    is_batch=True
-                                )
-
-                                # 重置防抖动滤波器状态（用于新视频）
-                                if intersection_filter:
-                                    # 保存当前调试信息
-                                    old_debug_info = intersection_filter.get_debug_info()
-                                    intersection_filter.reset()
-                                    print(f"已重置ROI2防抖动滤波器，切换到新视频: {os.path.basename(next_video_path)}")
-
-                                    # 根据滤波器类型显示不同的统计信息
-                                    if 'update_count' in old_debug_info:
-                                        # 阈值式滤波器
-                                        print(f"上一个视频的阈值防抖动统计: 处理{old_debug_info['frame_count']}帧, "
-                                              f"更新{old_debug_info['update_count']}次, "
-                                              f"稳定率{old_debug_info.get('stability_rate', 0):.1f}%")
-                                    else:
-                                        # EMA滤波器
-                                        print(f"上一个视频的EMA防抖动统计: 处理{old_debug_info['frame_count']}帧, "
-                                              f"大运动{old_debug_info['large_movement_count']}次, "
-                                              f"边界限制{old_debug_info.get('boundary_clamp_count', 0)}次")
-
-                                # 重置全局状态变量（防止数据污染）
-                                gray_buffer.clear()
-                                roi1_gray_buffer.clear()
-                                roi3_gray_buffer.clear()
-                                roi3_80_160_buffer.clear()
-                                roi3_g1_buffer.clear()  # 清空G1缓冲区
-                                roi3_g2_buffer.clear()  # 清空G2缓冲区
-                                roi3_column_diff_buffer.clear()  # 清空列灰度差值缓冲区
-                                reset_values = reset_video_state_variables(gray_buffer)
-                                (bg_count, bg_mean, last_intersection_roi, frames_since_protection_end,
-                                 threshold_protection_active, protection_end_time, consecutive_below_threshold,
-                                 last_waveform_time, frame_index, first_video_frame) = reset_values
-
-                                # 重置ROI1状态变量
-                                (
-                                    roi1_bg_count,
-                                    roi1_bg_mean,
-                                    roi1_threshold_protection_active,
-                                    roi1_protection_end_time,
-                                    roi1_consecutive_below_threshold,
-                                    roi1_last_waveform_time,
-                                    roi1_threshold_used,
-                                ) = reset_roi1_state(
-                                    roi1_threshold=roi1_threshold,
-                                    roi1_threshold_minimum=roi1_threshold_minimum,
-                                )
-
-                                # 重置ROI1波峰ID管理机制
-                                processed_roi1_peaks.clear()
-                                roi1_peak_counter = 0
-
-                                print(f"已重置全局和ROI1状态变量，确保数据隔离")
-
-                                video_cap = initialize_video_capture(next_video_path)
-                                print(f"\n" + "="*50)
-                                print(f"开始处理下一个视频 ({current_video_index + 1}/{len(video_files)}):")
-                                print(f"文件名: {os.path.basename(next_video_path)}")
-                                print(f"统计会话: {current_stats.session_id}")
-
-                                # 重新计算新视频的帧率参数
-                                video_fps = get_video_fps(video_cap)
-                                if video_fps > 0:
-                                    effective_frame_rate = min(roi_frame_rate, video_fps)
-                                    if effective_frame_rate > 0:
-                                        video_frame_step = max(1, int(round(video_fps / effective_frame_rate)))
-
-                                # 创建每视频文件夹结构
-                                tmp_root = _create_video_folders(
-                                    next_video_path,
-                                    current_stats.session_id,
-                                    processing_mode,
-                                    save_roi1,
-                                    save_roi2,
-                                    save_roi3,
-                                    save_wave,
-                                    save_roi1_wave
-                                )
-
-                                # 关键修复：更新ROI保存路径变量
-                                roi1_dir = os.path.join(tmp_root, "roi1")
-                                roi2_dir = os.path.join(tmp_root, "roi2")
-                                roi3_dir = os.path.join(tmp_root, "roi3")
-                                wave_dir = os.path.join(tmp_root, "wave")
-                                wave1_dir = os.path.join(tmp_root, "wave1")
-
-                                print(f"[video] source_fps={video_fps:.2f} target_fps={effective_frame_rate:.2f} frame_step={video_frame_step}")
-                                print(f"[folders] tmp_root={tmp_root}")
-                                print(f"[folders] roi1_dir={roi1_dir}")
-                                print(f"[folders] roi2_dir={roi2_dir}")
-                                print(f"[folders] wave_dir={wave_dir}")
-                                print("="*50)
-
-                                # 重置帧索引和首帧标志
-                                frame_index = 0
-                                first_video_frame = True
-
-                                # Keep ctx in sync after switching videos
-                                _sync_ctx_after_video_switch(
-                                    ctx=ctx,
-                                    frame_index=frame_index,
-                                    last_intersection_roi=last_intersection_roi,
-                                    processed_roi1_peaks=processed_roi1_peaks,
-                                    roi1_peak_counter=roi1_peak_counter,
-                                    bg_count=bg_count,
-                                    bg_mean=bg_mean,
-                                    frames_since_protection_end=frames_since_protection_end,
-                                    threshold_protection_active=threshold_protection_active,
-                                    protection_end_time=protection_end_time,
-                                    consecutive_below_threshold=consecutive_below_threshold,
-                                    last_waveform_time=last_waveform_time,
-                                    roi1_bg_count=roi1_bg_count,
-                                    roi1_bg_mean=roi1_bg_mean,
-                                    roi1_threshold_protection_active=roi1_threshold_protection_active,
-                                    roi1_protection_end_time=roi1_protection_end_time,
-                                    roi1_consecutive_below_threshold=roi1_consecutive_below_threshold,
-                                    roi1_last_waveform_time=roi1_last_waveform_time,
-                                    roi1_threshold_used=roi1_threshold_used,
-                                    video_cap=video_cap,
-                                    current_video_index=current_video_index,
-                                    video_fps=video_fps,
-                                    video_frame_step=video_frame_step,
-                                    first_video_frame=first_video_frame,
-                                    effective_frame_rate=effective_frame_rate,
-                                    tmp_root=tmp_root,
-                                    roi1_dir=roi1_dir,
-                                    roi2_dir=roi2_dir,
-                                    roi3_dir=roi3_dir,
-                                    wave_dir=wave_dir,
-                                    wave1_dir=wave1_dir,
-                                )
-
-                                # Start a new cache session for the new video/statistics session
-                                try:
-                                    analysis_cache.start_session(
-                                        current_stats.session_id,
-                                        processing_mode=processing_mode,
-                                        video_path=next_video_path,
-                                        config=config,
-                                        extra_meta={
-                                            "roi_frame_rate": roi_frame_rate,
-                                            "effective_frame_rate": effective_frame_rate,
-                                            "video_fps": video_fps,
-                                            "video_frame_step": video_frame_step,
-                                            "adaptive_window_frames": adaptive_window_frames,
-                                            "gray_buffer_maxlen": 100,
-                                        },
-                                    )
-                                    if analysis_cache.path:
-                                        print(f"[cache] analysis_cache={analysis_cache.path}")
-                                except Exception:
-                                    pass
-
-                                # 继续处理下一个视频，不break
-                                continue
-                            except Exception as e:
-                                print(f"无法打开下一个视频 {next_video_path}: {e}")
-                                print("继续处理下一个视频...")
-                                continue
-                        else:
-                            # 所有视频都处理完毕
-                            total_time = time.time() - (loop_start - (frame_index * interval_seconds))
-                            actual_fps = frame_index / total_time if total_time > 0 else 0
-                            msg = f"\n" + "="*50
-                            print(msg)
-                            logging.info(msg)
-                            msg = f"所有视频处理完成！"
-                            print(msg)
-                            logging.info(msg)
-                            msg = f"[统计] 总处理时间: {total_time:.2f} 秒"
-                            print(msg)
-                            logging.info(msg)
-                            msg = f"[统计] 总处理视频数: {len(video_files)}"
-                            print(msg)
-                            logging.info(msg)
-                            msg = f"[统计] 总处理帧数: {frame_index}"
-                            print(msg)
-                            logging.info(msg)
-                            msg = f"[统计] 平均帧率: {actual_fps:.2f} fps"
-                            print(msg)
-                            logging.info(msg)
-                            msg = f"[统计] 配置帧率: {roi_frame_rate:.2f} fps"
-                            print(msg)
-                            logging.info(msg)
-                            msg = "="*50
-                            print(msg)
-                            logging.info(msg)
-                            break
+                        raise RuntimeError("video capture returned no frame")
                     screen_width, screen_height = screen.size
                 else:
                     screen = capture_screen()
