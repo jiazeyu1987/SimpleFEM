@@ -12,11 +12,9 @@ Usage:
 """
 
 import logging
-import os
-import sys
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import cv2
 
@@ -27,6 +25,8 @@ from fem_refactor.frame_step import process_frame
 from fem_refactor.daemon_bootstrap import DaemonBootstrap
 from fem_refactor.models import DaemonContext
 from fem_refactor.video_session_manager import VideoSessionManager
+from fem_refactor.video_statistics_manager import statistics_manager, safe_statistics
+from fem_refactor.video_folders import create_video_folders, sanitize_video_name
 
 
 def _get_video_seconds(*, processing_mode: str, video_cap: Any) -> Optional[float]:
@@ -54,128 +54,22 @@ def _get_base_dir() -> str:
 BASE_DIR = _get_base_dir()
 
 
-def _setup_import_paths() -> None:
-    """
-    Ensure we can import local peak_detection and green_detector modules.
-
-    All required files (simple_roi_daemon.py, peak_detection.py, green_detector.py,
-    simple_fem_config.json) are expected to be in the same SimpleFEM directory.
-    """
-    if BASE_DIR not in sys.path:
-        sys.path.append(BASE_DIR)
-
-
-_setup_import_paths()
-
-from safe_peak_statistics import SafePeakStatistics  # type: ignore  # noqa: E402
-
-
-class VideoStatisticsManager:
-    """管理每视频的统计实例"""
-
-    def __init__(self):
-        self.current_statistics: Optional[SafePeakStatistics] = None
-        self.all_statistics: List[SafePeakStatistics] = []
-        self.is_batch_mode = False
-        self.session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    def initialize_for_video(self, video_path: str, is_batch: bool = False):
-        """为视频初始化新的统计实例"""
-        # 关闭之前的统计
-        if self.current_statistics:
-            self.current_statistics.export_final_csv()
-            self.all_statistics.append(self.current_statistics)
-
-        # 创建新的统计实例
-        self.is_batch_mode = is_batch
-        video_name = os.path.basename(video_path) if video_path else None
-        self.current_statistics = SafePeakStatistics(
-            video_name=video_name,
-            is_batch_mode=is_batch
-        )
-
-        return self.current_statistics
-
-    def get_global_summary(self) -> Dict[str, Any]:
-        """聚合所有视频的汇总信息"""
-        if not self.all_statistics:
-            return {
-                'total_videos_processed': 0,
-                'total_peaks': 0,
-                'total_green_peaks': 0,
-                'total_red_peaks': 0,
-                'session_duration': '00:00:00',
-                'videos_processed': []
-            }
-
-        total_peaks = sum(len(s.stats_data) for s in self.all_statistics)
-        total_green = sum(len([p for p in s.stats_data if p['peak_type'] == 'green'])
-                         for s in self.all_statistics)
-        total_red = sum(len([p for p in s.stats_data if p['peak_type'] == 'red'])
-                       for s in self.all_statistics)
-
-        session_start_dt = datetime.strptime(self.session_start, "%Y%m%d_%H%M%S")
-        session_duration = str(datetime.now() - session_start_dt).split('.')[0]
-
-        return {
-            'total_videos_processed': len(self.all_statistics),
-            'total_peaks': total_peaks,
-            'total_green_peaks': total_green,
-            'total_red_peaks': total_red,
-            'session_duration': session_duration,
-            'videos_processed': [s.video_name for s in self.all_statistics]
-        }
-
-
-# 全局统计管理器实例
-statistics_manager = VideoStatisticsManager()
-
-# 为了向后兼容，保持原有的safe_statistics全局变量
-safe_statistics = statistics_manager.current_statistics
-
-
 def _sanitize_video_name(video_name: str) -> str:
-    """清理视频名称用于文件夹创建"""
-    import re
-    sanitized = re.sub(r'[<>:"/\\|?*]', '_', video_name)
-    sanitized = sanitized.strip('._')[:50]
-    return sanitized or f"video_{int(time.time())}"
+    return sanitize_video_name(video_name)
 
 
 def _create_video_folders(video_path: str, session_id: str, processing_mode: str, save_roi1: bool, save_roi2: bool, save_roi3: bool, save_wave: bool, save_roi1_wave: bool = False) -> str:
-    """创建每视频的文件夹结构"""
-    if processing_mode == "video":
-        # 批量模式：使用视频名称
-        video_name = os.path.splitext(os.path.basename(video_path))[0]
-        sanitized_name = _sanitize_video_name(video_name)
-        tmp_root = os.path.join(BASE_DIR, "tmp", sanitized_name)
-    else:
-        # 屏幕模式：使用基于会话的命名（原有行为）
-        session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tmp_root = os.path.join(BASE_DIR, "tmp", session_start)
-
-    # 创建子文件夹
-    roi1_dir = os.path.join(tmp_root, "roi1")
-    roi2_dir = os.path.join(tmp_root, "roi2")
-    roi3_dir = os.path.join(tmp_root, "roi3")
-    wave_dir = os.path.join(tmp_root, "wave")
-    wave1_dir = os.path.join(tmp_root, "wave1")
-
-    # 根据配置创建目录
-    if save_roi1 or save_roi2 or save_roi3 or save_wave or save_roi1_wave:
-        os.makedirs(tmp_root, exist_ok=True)
-    if save_roi1:
-        os.makedirs(roi1_dir, exist_ok=True)
-    if save_roi2:
-        os.makedirs(roi2_dir, exist_ok=True)
-    if save_roi3:
-        os.makedirs(roi3_dir, exist_ok=True)
-    if save_wave:
-        os.makedirs(wave_dir, exist_ok=True)
-    if save_roi1_wave:
-        os.makedirs(wave1_dir, exist_ok=True)
-
-    return tmp_root
+    return create_video_folders(
+        base_dir=BASE_DIR,
+        video_path=video_path,
+        session_id=session_id,
+        processing_mode=processing_mode,
+        save_roi1=save_roi1,
+        save_roi2=save_roi2,
+        save_roi3=save_roi3,
+        save_wave=save_wave,
+        save_roi1_wave=save_roi1_wave,
+    )
 
 
 def run_daemon() -> None:
@@ -187,15 +81,15 @@ def run_daemon() -> None:
       - update gray buffer and run peak detection
       - log results at configured frame_rate
     """
-    try:
-        ctx: Optional[DaemonContext] = None
-        analysis_cache: Optional[RoiAnalysisCache] = None
-        intersection_filter: Any = None
-        processing_mode: str = "screen"
-        interval_seconds: float = 1.0
-        logger: Optional[logging.Logger] = None
-        video_session_manager: Optional[VideoSessionManager] = None
+    ctx: Optional[DaemonContext] = None
+    analysis_cache: Optional[RoiAnalysisCache] = None
+    intersection_filter: Any = None
+    processing_mode: str = "screen"
+    interval_seconds: float = 1.0
+    logger: Optional[logging.Logger] = None
+    video_session_manager: Optional[VideoSessionManager] = None
 
+    try:
         boot = DaemonBootstrap(
             base_dir=BASE_DIR,
             statistics_manager=statistics_manager,
@@ -347,18 +241,18 @@ def run_daemon() -> None:
             )
 
     finally:
-        if 'analysis_cache' in locals() and analysis_cache is not None:
+        if analysis_cache is not None:
             try:
                 analysis_cache.close(reason="shutdown")
             except Exception:
                 pass
         # 释放视频资源
-        if 'ctx' in locals() and ctx is not None and ctx.video.video_cap is not None:
+        if ctx is not None and ctx.video.video_cap is not None:
             ctx.video.video_cap.release()
             print("视频资源已释放")
 
         # 输出防抖动滤波器最终统计信息
-        if 'intersection_filter' in locals() and intersection_filter:
+        if intersection_filter:
             try:
                 debug_info = intersection_filter.get_debug_info()
                 print(f"\n防抖动滤波器最终统计:")

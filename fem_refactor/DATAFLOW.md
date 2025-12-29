@@ -1,4 +1,4 @@
-# SimpleFEM ROI Daemon Dataflow（数据流）
+﻿# SimpleFEM ROI Daemon Dataflow（数据流）
 
 本文描述 `simple_roi_daemon.py` 的运行数据流，目标是为后续“管理类拆分”提供边界依据；**所有判定逻辑保持不变**，仅做结构重组。
 

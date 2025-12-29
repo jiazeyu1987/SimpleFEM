@@ -1,4 +1,4 @@
-# SimpleFEM ROI Daemon Refactor TODOLIST（拆分顺序与任务清单）
+﻿# SimpleFEM ROI Daemon Refactor TODOLIST（拆分顺序与任务清单）
 
 目标：将 `simple_roi_daemon.py` 的代码重构到 `fem_refactor/` 下，拆成若干“管理类/模块”，**主运行文件只负责调用**，并且**所有判定逻辑不修改**（输出一致性为第一优先级）。
 
