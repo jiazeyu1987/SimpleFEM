@@ -45,6 +45,7 @@ from fem_refactor.models import (
     ThresholdState,
     VideoState,
 )
+from fem_refactor.signal_buffers import create_signal_buffers
 from fem_refactor.video_session_manager import VideoSessionManager
 
 
@@ -60,43 +61,6 @@ def _get_video_seconds(*, processing_mode: str, video_cap: Any) -> Optional[floa
     return None
 
 
-def _sync_ctx_for_frame(
-    *,
-    ctx: DaemonContext,
-    frame_index: int,
-    processing_mode: str,
-    video_cap: Any,
-    current_video_index: int,
-    video_fps: float,
-    video_frame_step: int,
-    first_video_frame: bool,
-    effective_frame_rate: float,
-    interval_seconds: float,
-    tmp_root: str,
-    roi1_dir: str,
-    roi2_dir: str,
-    roi3_dir: str,
-    wave_dir: str,
-    wave1_dir: str,
-) -> None:
-    ctx.state.frame_index = frame_index
-    ctx.video.processing_mode = processing_mode
-    ctx.video.video_cap = video_cap
-    ctx.video.current_video_index = current_video_index
-    ctx.video.video_fps = video_fps
-    ctx.video.video_frame_step = video_frame_step
-    ctx.video.first_video_frame = first_video_frame
-    ctx.video.effective_frame_rate = effective_frame_rate
-    ctx.video.interval_seconds = interval_seconds
-    ctx.paths.tmp_root = tmp_root
-    ctx.paths.roi1_dir = roi1_dir
-    ctx.paths.roi2_dir = roi2_dir
-    ctx.paths.roi3_dir = roi3_dir
-    ctx.paths.wave_dir = wave_dir
-    ctx.paths.wave1_dir = wave1_dir
-from fem_refactor.signal_buffers import (
-    create_signal_buffers,
-)
 def _get_base_dir() -> str:
     """
     Resolve base directory both for source (.py) and frozen (.exe) modes.
@@ -243,6 +207,8 @@ def run_daemon() -> None:
       - update gray buffer and run peak detection
       - log results at configured frame_rate
     """
+    ctx: Optional[DaemonContext] = None
+
     # 配置日志系统（在清理之前，以便记录清理过程）
     log_file = setup_logging()
     logging.info("SimpleFEM ROI Daemon 启动...")
@@ -542,125 +508,128 @@ def run_daemon() -> None:
         except Exception:
             pass
 
-        ctx = DaemonContext(
-            cfg=ConfigValues(
-                raw=config,
-                roi_default=roi_default,
-                extension_params=extension_params,
-                roi3_extension_params=roi3_extension_params,
-                save_roi1=save_roi1,
-                save_roi2=save_roi2,
-                save_roi3=save_roi3,
-                save_wave=save_wave,
-                save_roi1_wave=save_roi1_wave,
-                only_delect=only_delect,
-                threshold=threshold,
-                threshold_minimum=threshold_minimum,
-                margin_frames=margin_frames,
-                diff_threshold=diff_threshold,
-                silence_frames=silence_frames,
-                pre_post_avg_frames=pre_post_avg_frames,
-                min_region_length=min_region_length,
-                adaptive_threshold_enabled=adaptive_threshold_enabled,
-                threshold_over_mean_ratio=threshold_over_mean_ratio,
-                adaptive_window_seconds=adaptive_window_seconds,
-                adaptive_window_frames=adaptive_window_frames,
-                protection_enabled=protection_enabled,
-                recovery_delay_seconds=recovery_delay_seconds,
-                recovery_delay_frames=recovery_delay_frames,
-                stability_frames=stability_frames,
-                waveform_trigger_enabled=waveform_trigger_enabled,
-                roi1_enabled=roi1_enabled,
-                roi1_threshold=roi1_threshold,
-                roi1_threshold_minimum=roi1_threshold_minimum,
-                roi1_margin_frames=roi1_margin_frames,
-                roi1_silence_frames=roi1_silence_frames,
-                roi1_pre_post_avg_frames=roi1_pre_post_avg_frames,
-                roi1_difference_threshold=roi1_difference_threshold,
-                roi1_min_region_length=roi1_min_region_length,
-                roi1_adaptive_threshold_enabled=roi1_adaptive_threshold_enabled,
-                roi1_threshold_over_mean_ratio=roi1_threshold_over_mean_ratio,
-                roi1_adaptive_window_seconds=roi1_adaptive_window_seconds,
-                roi1_protection_enabled=roi1_protection_enabled,
-                roi1_recovery_delay_seconds=roi1_recovery_delay_seconds,
-                roi1_stability_frames=roi1_stability_frames,
-                roi1_waveform_trigger_enabled=roi1_waveform_trigger_enabled,
-                hybrid_enabled=hybrid_enabled,
-                roi2_pre_frames=roi2_pre_frames,
-                roi2_post_frames=roi2_post_frames,
-                min_roi2_frames=min_roi2_frames,
-                roi2_min_variance=roi2_min_variance,
-                fallback_enabled=fallback_enabled,
-                max_peak_width=max_peak_width,
-                data_quality_conf=data_quality_conf,
-                hybrid_conf=hybrid_conf,
-                g1_g2_override_enabled=g1_g2_override_enabled,
-                g1_threshold=g1_threshold,
-                g2_threshold=g2_threshold,
-                use_peak_max_g1_g2=use_peak_max_g1_g2,
-            ),
-            video=VideoState(
-                processing_mode=processing_mode,
-                video_cap=video_cap,
-                video_files=list(video_files) if video_files else [],
-                current_video_index=int(current_video_index),
-                video_fps=float(video_fps),
-                video_frame_step=int(video_frame_step),
-                first_video_frame=bool(first_video_frame),
-                effective_frame_rate=float(effective_frame_rate),
-                interval_seconds=float(interval_seconds),
-            ),
-            paths=Paths(
-                base_dir=BASE_DIR,
-                tmp_root=str(tmp_root),
-                roi1_dir=str(roi1_dir),
-                roi2_dir=str(roi2_dir),
-                roi3_dir=str(roi3_dir),
-                wave_dir=str(wave_dir),
-                wave1_dir=str(wave1_dir),
-            ),
-            buffers=Buffers(
-                gray_buffer=gray_buffer,
-                roi1_gray_buffer=roi1_gray_buffer,
-                roi3_gray_buffer=roi3_gray_buffer,
-                roi3_80_160_buffer=roi3_80_160_buffer,
-                roi3_g1_buffer=roi3_g1_buffer,
-                roi3_g2_buffer=roi3_g2_buffer,
-                roi3_column_diff_buffer=roi3_column_diff_buffer,
-            ),
-            thr=ThresholdState(
-                bg_count=int(bg_count),
-                bg_mean=float(bg_mean),
-                frames_since_protection_end=int(frames_since_protection_end),
-                threshold_protection_active=bool(threshold_protection_active),
-                protection_end_time=float(protection_end_time),
-                consecutive_below_threshold=int(consecutive_below_threshold),
-                last_waveform_time=float(last_waveform_time),
-            ),
-            roi1_thr=Roi1ThresholdState(
-                bg_count=int(roi1_bg_count),
-                bg_mean=float(roi1_bg_mean),
-                threshold_protection_active=bool(roi1_threshold_protection_active),
-                protection_end_time=float(roi1_protection_end_time),
-                consecutive_below_threshold=int(roi1_consecutive_below_threshold),
-                last_waveform_time=float(roi1_last_waveform_time),
-                threshold_used=float(roi1_threshold_used),
-            ),
-            managers=Managers(
-                statistics_manager=statistics_manager,
-                analysis_cache=analysis_cache,
-                intersection_manager=intersection_manager,
-                intersection_filter=intersection_filter,
-                anti_jitter_config=anti_jitter_config,
-                logger=logger,
-            ),
-            state=RuntimeState(
-                frame_index=int(frame_index),
-                last_intersection_roi=last_intersection_roi,
-                processed_roi1_peaks=processed_roi1_peaks,
-                roi1_peak_counter=int(roi1_peak_counter),
-            ),
-        )
+        def _build_ctx() -> DaemonContext:
+            return DaemonContext(
+                cfg=ConfigValues(
+                    raw=config,
+                    roi_default=roi_default,
+                    extension_params=extension_params,
+                    roi3_extension_params=roi3_extension_params,
+                    save_roi1=save_roi1,
+                    save_roi2=save_roi2,
+                    save_roi3=save_roi3,
+                    save_wave=save_wave,
+                    save_roi1_wave=save_roi1_wave,
+                    only_delect=only_delect,
+                    threshold=threshold,
+                    threshold_minimum=threshold_minimum,
+                    margin_frames=margin_frames,
+                    diff_threshold=diff_threshold,
+                    silence_frames=silence_frames,
+                    pre_post_avg_frames=pre_post_avg_frames,
+                    min_region_length=min_region_length,
+                    adaptive_threshold_enabled=adaptive_threshold_enabled,
+                    threshold_over_mean_ratio=threshold_over_mean_ratio,
+                    adaptive_window_seconds=adaptive_window_seconds,
+                    adaptive_window_frames=adaptive_window_frames,
+                    protection_enabled=protection_enabled,
+                    recovery_delay_seconds=recovery_delay_seconds,
+                    recovery_delay_frames=recovery_delay_frames,
+                    stability_frames=stability_frames,
+                    waveform_trigger_enabled=waveform_trigger_enabled,
+                    roi1_enabled=roi1_enabled,
+                    roi1_threshold=roi1_threshold,
+                    roi1_threshold_minimum=roi1_threshold_minimum,
+                    roi1_margin_frames=roi1_margin_frames,
+                    roi1_silence_frames=roi1_silence_frames,
+                    roi1_pre_post_avg_frames=roi1_pre_post_avg_frames,
+                    roi1_difference_threshold=roi1_difference_threshold,
+                    roi1_min_region_length=roi1_min_region_length,
+                    roi1_adaptive_threshold_enabled=roi1_adaptive_threshold_enabled,
+                    roi1_threshold_over_mean_ratio=roi1_threshold_over_mean_ratio,
+                    roi1_adaptive_window_seconds=roi1_adaptive_window_seconds,
+                    roi1_protection_enabled=roi1_protection_enabled,
+                    roi1_recovery_delay_seconds=roi1_recovery_delay_seconds,
+                    roi1_stability_frames=roi1_stability_frames,
+                    roi1_waveform_trigger_enabled=roi1_waveform_trigger_enabled,
+                    hybrid_enabled=hybrid_enabled,
+                    roi2_pre_frames=roi2_pre_frames,
+                    roi2_post_frames=roi2_post_frames,
+                    min_roi2_frames=min_roi2_frames,
+                    roi2_min_variance=roi2_min_variance,
+                    fallback_enabled=fallback_enabled,
+                    max_peak_width=max_peak_width,
+                    data_quality_conf=data_quality_conf,
+                    hybrid_conf=hybrid_conf,
+                    g1_g2_override_enabled=g1_g2_override_enabled,
+                    g1_threshold=g1_threshold,
+                    g2_threshold=g2_threshold,
+                    use_peak_max_g1_g2=use_peak_max_g1_g2,
+                ),
+                video=VideoState(
+                    processing_mode=processing_mode,
+                    video_cap=video_cap,
+                    video_files=list(video_files) if video_files else [],
+                    current_video_index=int(current_video_index),
+                    video_fps=float(video_fps),
+                    video_frame_step=int(video_frame_step),
+                    first_video_frame=bool(first_video_frame),
+                    effective_frame_rate=float(effective_frame_rate),
+                    interval_seconds=float(interval_seconds),
+                ),
+                paths=Paths(
+                    base_dir=BASE_DIR,
+                    tmp_root=str(tmp_root),
+                    roi1_dir=str(roi1_dir),
+                    roi2_dir=str(roi2_dir),
+                    roi3_dir=str(roi3_dir),
+                    wave_dir=str(wave_dir),
+                    wave1_dir=str(wave1_dir),
+                ),
+                buffers=Buffers(
+                    gray_buffer=gray_buffer,
+                    roi1_gray_buffer=roi1_gray_buffer,
+                    roi3_gray_buffer=roi3_gray_buffer,
+                    roi3_80_160_buffer=roi3_80_160_buffer,
+                    roi3_g1_buffer=roi3_g1_buffer,
+                    roi3_g2_buffer=roi3_g2_buffer,
+                    roi3_column_diff_buffer=roi3_column_diff_buffer,
+                ),
+                thr=ThresholdState(
+                    bg_count=int(bg_count),
+                    bg_mean=float(bg_mean),
+                    frames_since_protection_end=int(frames_since_protection_end),
+                    threshold_protection_active=bool(threshold_protection_active),
+                    protection_end_time=float(protection_end_time),
+                    consecutive_below_threshold=int(consecutive_below_threshold),
+                    last_waveform_time=float(last_waveform_time),
+                ),
+                roi1_thr=Roi1ThresholdState(
+                    bg_count=int(roi1_bg_count),
+                    bg_mean=float(roi1_bg_mean),
+                    threshold_protection_active=bool(roi1_threshold_protection_active),
+                    protection_end_time=float(roi1_protection_end_time),
+                    consecutive_below_threshold=int(roi1_consecutive_below_threshold),
+                    last_waveform_time=float(roi1_last_waveform_time),
+                    threshold_used=float(roi1_threshold_used),
+                ),
+                managers=Managers(
+                    statistics_manager=statistics_manager,
+                    analysis_cache=analysis_cache,
+                    intersection_manager=intersection_manager,
+                    intersection_filter=intersection_filter,
+                    anti_jitter_config=anti_jitter_config,
+                    logger=logger,
+                ),
+                state=RuntimeState(
+                    frame_index=int(frame_index),
+                    last_intersection_roi=last_intersection_roi,
+                    processed_roi1_peaks=processed_roi1_peaks,
+                    roi1_peak_counter=int(roi1_peak_counter),
+                ),
+            )
+
+        ctx = _build_ctx()
 
         video_session_manager: Optional[VideoSessionManager] = None
         if processing_mode == "video":
@@ -687,7 +656,8 @@ def run_daemon() -> None:
             log_line: Optional[str] = None
 
             try:
-                frame_index += 1
+                ctx.state.frame_index += 1
+                frame_index = ctx.state.frame_index
 
                 # 1. Capture image (screen or video frame)
                 if processing_mode == "video":
@@ -699,21 +669,6 @@ def run_daemon() -> None:
                         interval_seconds=interval_seconds,
                         frame_index=frame_index,
                     )
-
-                    # Sync locals from ctx (for logging/debug/finally blocks)
-                    video_cap = ctx.video.video_cap
-                    current_video_index = ctx.video.current_video_index
-                    video_fps = ctx.video.video_fps
-                    video_frame_step = ctx.video.video_frame_step
-                    first_video_frame = ctx.video.first_video_frame
-                    effective_frame_rate = ctx.video.effective_frame_rate
-                    tmp_root = ctx.paths.tmp_root
-                    roi1_dir = ctx.paths.roi1_dir
-                    roi2_dir = ctx.paths.roi2_dir
-                    roi3_dir = ctx.paths.roi3_dir
-                    wave_dir = ctx.paths.wave_dir
-                    wave1_dir = ctx.paths.wave1_dir
-                    frame_index = ctx.state.frame_index if capture_result.should_continue else frame_index
 
                     if capture_result.should_break:
                         break
@@ -728,26 +683,9 @@ def run_daemon() -> None:
                     screen = capture_screen()
                     screen_width, screen_height = screen.size
 
-                video_seconds = _get_video_seconds(processing_mode=processing_mode, video_cap=video_cap)
-
-                # Sync live locals into ctx (ctx is the source-of-truth for frame processing)
-                _sync_ctx_for_frame(
-                    ctx=ctx,
-                    frame_index=frame_index,
-                    processing_mode=processing_mode,
-                    video_cap=video_cap,
-                    current_video_index=current_video_index,
-                    video_fps=video_fps,
-                    video_frame_step=video_frame_step,
-                    first_video_frame=first_video_frame,
-                    effective_frame_rate=effective_frame_rate,
-                    interval_seconds=interval_seconds,
-                    tmp_root=tmp_root,
-                    roi1_dir=roi1_dir,
-                    roi2_dir=roi2_dir,
-                    roi3_dir=roi3_dir,
-                    wave_dir=wave_dir,
-                    wave1_dir=wave1_dir,
+                video_seconds = _get_video_seconds(
+                    processing_mode=ctx.video.processing_mode,
+                    video_cap=ctx.video.video_cap,
                 )
 
                 step_result = process_frame(
@@ -786,8 +724,9 @@ def run_daemon() -> None:
         except Exception:
             pass
         # 释放视频资源
-        if video_cap is not None:
-            video_cap.release()
+        cap_to_release = ctx.video.video_cap if (ctx is not None) else video_cap
+        if cap_to_release is not None:
+            cap_to_release.release()
             print("视频资源已释放")
 
         # 输出防抖动滤波器最终统计信息
@@ -817,67 +756,4 @@ def run_daemon() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        run_daemon()
-    except KeyboardInterrupt:
-        # 程序结束时导出最终CSV文件（task要求）
-        msg = "\n数据处理完成，CSV文件已保存..."
-        print(msg)
-        logging.info(msg)
-        try:
-            # 获取当前统计文件路径
-            current_stats = statistics_manager.current_statistics
-            if current_stats:
-                export_path = current_stats.export_final_csv()
-                if export_path:
-                    msg = f"✅ 当前视频CSV文件已保存至: {export_path}"
-                    print(msg)
-                    logging.info(msg)
-
-            # 显示所有视频的统计摘要
-            global_summary = statistics_manager.get_global_summary()
-            msg = f"📊 批量处理统计摘要:"
-            print(msg)
-            logging.info(msg)
-            msg = f"   总处理视频数: {global_summary.get('total_videos_processed', 0)}"
-            print(msg)
-            logging.info(msg)
-            msg = f"   总波峰数: {global_summary.get('total_peaks', 0)}"
-            print(msg)
-            logging.info(msg)
-            msg = f"   绿色波峰: {global_summary.get('total_green_peaks', 0)}"
-            print(msg)
-            logging.info(msg)
-            msg = f"   红色波峰: {global_summary.get('total_red_peaks', 0)}"
-            print(msg)
-            logging.info(msg)
-            msg = f"   会话时长: {global_summary.get('session_duration', 'N/A')}"
-            print(msg)
-            logging.info(msg)
-
-            # 显示每个视频的详细信息
-            videos_processed = global_summary.get('videos_processed', [])
-            if videos_processed:
-                msg = f"   处理的视频: {', '.join(videos_processed)}"
-                print(msg)
-                logging.info(msg)
-
-        except Exception as e:
-            msg = f"❌ 处理CSV文件时发生错误: {e}"
-            print(msg)
-            logging.error(msg)
-
-        msg = "守护进程已停止"
-        print(msg)
-        logging.info(msg)
-    except Exception as e:
-        print(f"❌ 守护进程运行时发生错误: {e}")
-        # 即使出错也尝试保存数据
-        try:
-            current_stats = statistics_manager.current_statistics
-            if current_stats:
-                export_path = current_stats.export_final_csv()
-                if export_path:
-                    print(f"✅ 异常停止前数据已保存至: {export_path}")
-        except Exception:
-            pass
+    run_daemon()
