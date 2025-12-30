@@ -3,15 +3,94 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import os
+import sys
 from datetime import datetime
+from typing import Any, Optional
 
 from .paths import get_base_dir
 
 BASE_DIR = get_base_dir(__file__)
 
 
-def setup_logging():
+_MASTER_LOGGING_ENABLED: bool = True
+_ORIG_STDOUT: Optional[Any] = None
+_ORIG_STDERR: Optional[Any] = None
+_DEVNULL: Optional[Any] = None
+
+
+def _parse_bool_env(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def resolve_master_logging_enabled(config: Optional[dict] = None) -> bool:
+    env_override = _parse_bool_env(os.getenv("SIMPLEFEM_LOGGING_ENABLED"))
+    if env_override is not None:
+        return env_override
+
+    if isinstance(config, dict):
+        logging_cfg = config.get("logging", {})
+        if isinstance(logging_cfg, dict) and "enabled" in logging_cfg:
+            return bool(logging_cfg.get("enabled", True))
+
+    return True
+
+
+def set_master_logging_enabled(enabled: bool) -> None:
+    global _MASTER_LOGGING_ENABLED, _ORIG_STDOUT, _ORIG_STDERR, _DEVNULL
+
+    enabled = bool(enabled)
+    _MASTER_LOGGING_ENABLED = enabled
+
+    if enabled:
+        if _ORIG_STDOUT is not None:
+            sys.stdout = _ORIG_STDOUT
+        if _ORIG_STDERR is not None:
+            sys.stderr = _ORIG_STDERR
+        if _DEVNULL is not None:
+            try:
+                _DEVNULL.close()
+            except Exception:
+                pass
+        _ORIG_STDOUT = None
+        _ORIG_STDERR = None
+        _DEVNULL = None
+        logging.getLogger().disabled = False
+        logging.disable(logging.NOTSET)
+        return
+
+    if _ORIG_STDOUT is None:
+        _ORIG_STDOUT = sys.stdout
+    if _ORIG_STDERR is None:
+        _ORIG_STDERR = sys.stderr
+    if _DEVNULL is None:
+        _DEVNULL = open(os.devnull, "w", encoding="utf-8", errors="ignore")
+
+    sys.stdout = _DEVNULL
+    sys.stderr = _DEVNULL
+    logging.disable(logging.CRITICAL)
+
+
+def is_master_logging_enabled() -> bool:
+    return bool(_MASTER_LOGGING_ENABLED)
+
+
+def setup_logging(*, enabled: Optional[bool] = None, config: Optional[dict] = None) -> str:
     """配置日志系统，输出到控制台和文件"""
+    if enabled is None:
+        enabled = resolve_master_logging_enabled(config)
+    set_master_logging_enabled(enabled)
+    if not enabled:
+        root = logging.getLogger()
+        root.handlers.clear()
+        root.disabled = True
+        return ""
     base_dir = BASE_DIR
     log_dir = os.path.join(base_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -58,9 +137,19 @@ def setup_logging():
     return log_file
 
 
-def setup_peak_logger() -> logging.Logger:
+def setup_peak_logger(*, enabled: Optional[bool] = None) -> logging.Logger:
     """Create a logger that writes plain text lines and rotates daily."""
+    if enabled is None:
+        enabled = is_master_logging_enabled()
+
     logger = logging.getLogger("roi_peak_daemon")
+    if not enabled:
+        logger.handlers.clear()
+        logger.addHandler(logging.NullHandler())
+        logger.propagate = False
+        logger.disabled = True
+        return logger
+
     if logger.handlers:
         return logger
 
@@ -84,4 +173,3 @@ def setup_peak_logger() -> logging.Logger:
     logger.propagate = False
 
     return logger
-

@@ -6,6 +6,9 @@
 
 **输入**
 - 配置：`simple_fem_config.json`
+- 日志总开关：
+  - 配置：`logging.enabled`（false 时控制台与日志文件都不输出）
+  - 环境变量：`SIMPLEFEM_LOGGING_ENABLED=0`（优先级高于配置）
 - 输入源（按 `processing_mode`）：
   - `screen`：屏幕截取（`PIL.ImageGrab`）
   - `video`：视频文件/目录（OpenCV `cv2.VideoCapture`）

@@ -11,7 +11,12 @@ from fem_refactor.anti_jitter_manager import AntiJitterManager
 from fem_refactor.cleanup_manager import cleanup_directories
 from fem_refactor.config_loader import load_fem_config
 from fem_refactor.intersection_manager import IntersectionManager
-from fem_refactor.logging_manager import setup_logging, setup_peak_logger
+from fem_refactor.logging_manager import (
+    resolve_master_logging_enabled,
+    set_master_logging_enabled,
+    setup_logging,
+    setup_peak_logger,
+)
 from fem_refactor.models import (
     Buffers,
     ConfigValues,
@@ -59,15 +64,18 @@ class DaemonBootstrap:
         Refactor-only: behavior and decision logic must remain identical to the
         legacy inline setup in `daemon_loop.run_daemon()`.
         """
+        config = load_fem_config()
+
+        master_logging_enabled = resolve_master_logging_enabled(config)
+        set_master_logging_enabled(master_logging_enabled)
+
         # 配置日志系统（在清理之前，以便记录清理过程）
-        log_file = setup_logging()
+        log_file = setup_logging(enabled=master_logging_enabled, config=config)
         logging.info("SimpleFEM ROI Daemon 启动...")
         print("SimpleFEM ROI Daemon 启动...")
 
         # 清理现有的数据文件夹
         cleanup_directories()
-
-        config = load_fem_config()
 
         anti_jitter_config, intersection_filter = AntiJitterManager().build(config)
 
@@ -183,7 +191,7 @@ class DaemonBootstrap:
             f"use_peak_max={use_peak_max_g1_g2}"
         )
 
-        logger = setup_peak_logger()
+        logger = setup_peak_logger(enabled=master_logging_enabled)
 
         # Track a session-wide "background mean"
         bg_count: int = 0
