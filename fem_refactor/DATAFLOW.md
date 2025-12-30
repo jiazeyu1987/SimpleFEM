@@ -17,7 +17,7 @@
 - 日志：`logs/simple_roi_daemon_YYYYMMDD_HHMMSS.log`、`logs/roi_peak_daemon.log`
 - 统计 CSV：`export/peak_statistics_*.csv`
 - 临时图像/波形：`tmp/<session>/roi1|roi2|roi3|wave|wave1/...`
-- 分析缓存（JSONL）：`export/roi_analysis_cache_<session>_<runid>.jsonl`
+- 分析缓存（JSONL）：`fem_refactor/external/export/roi_analysis_cache_<session>_<runid>.jsonl`
 
 ## 1. 启动阶段（Startup）
 

@@ -89,8 +89,14 @@ class DaemonBootstrap:
         analysis_cache_conf = config.get("analysis_cache", {})
         if not isinstance(analysis_cache_conf, dict):
             analysis_cache_conf = {}
+
+        external_base_dir = os.path.join(self._base_dir, "fem_refactor", "external")
+        os.makedirs(external_base_dir, exist_ok=True)
+        export_dir = os.path.join(external_base_dir, "export")
+        os.makedirs(export_dir, exist_ok=True)
+
         analysis_cache = RoiAnalysisCache(
-            os.path.join(self._base_dir, "export"),
+            export_dir,
             enabled=bool(analysis_cache_conf.get("enabled", True)),
             flush_every=int(analysis_cache_conf.get("flush_every", 50)),
         )

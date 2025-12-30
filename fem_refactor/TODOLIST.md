@@ -73,7 +73,7 @@
 
 ## 回归对比建议（强烈建议做）
 - [ ] 固定同一视频（例如 `video/2（5次发射，1无效).mp4`）跑一遍，保存：
-  - `export/roi_analysis_cache_*.jsonl`
+  - `fem_refactor/external/export/roi_analysis_cache_*.jsonl`
   - `export/peak_statistics_*.csv`
   - `logs/simple_roi_daemon_*.log`
 - [ ] 每拆完一个模块，重跑并对比：
