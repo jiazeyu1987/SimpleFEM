@@ -80,7 +80,9 @@ class SafePeakStatistics:
 
         # 从配置文件读取参数
         try:
-            config_path = os.path.join(BASE_DIR, "simple_fem_config.json")
+            preferred_config_path = os.path.join(BASE_DIR, "fem_refactor", "simple_fem_config.json")
+            legacy_config_path = os.path.join(BASE_DIR, "simple_fem_config.json")
+            config_path = preferred_config_path if os.path.exists(preferred_config_path) else legacy_config_path
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)

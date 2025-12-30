@@ -8,6 +8,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from fem_refactor.analysis_cache import RoiAnalysisCache
 from fem_refactor.anti_jitter_manager import AntiJitterManager
+from fem_refactor.artifact_directories import prepare_artifact_dirs
 from fem_refactor.cleanup_manager import cleanup_directories
 from fem_refactor.config_loader import load_fem_config
 from fem_refactor.config_extractors import (
@@ -232,64 +233,24 @@ class DaemonBootstrap:
         processed_roi1_peaks: Dict[Tuple[int, int], str] = {}
         roi1_peak_counter: int = 0
 
-        # Prepare per-video image save directories if enabled
-        if processing_mode == "video" and video_files:
-            current_stats = self._statistics_manager.current_statistics
-            if current_stats and current_stats.video_name:
-                tmp_root = self._create_video_folders(
-                    video_files[0],
-                    current_stats.session_id,
-                    processing_mode,
-                    save_roi1,
-                    save_roi2,
-                    save_roi3,
-                    save_wave,
-                    save_roi1_wave,
-                )
-                roi1_dir = os.path.join(tmp_root, "roi1")
-                roi2_dir = os.path.join(tmp_root, "roi2")
-                roi3_dir = os.path.join(tmp_root, "roi3")
-                wave_dir = os.path.join(tmp_root, "wave")
-                wave1_dir = os.path.join(tmp_root, "wave1")
-            else:
-                session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
-                tmp_root = os.path.join(self._base_dir, "tmp", session_start)
-                if save_roi1 or save_roi2 or save_wave:
-                    os.makedirs(tmp_root, exist_ok=True)
-                if save_roi1:
-                    os.makedirs(os.path.join(tmp_root, "roi1"), exist_ok=True)
-                if save_roi2:
-                    os.makedirs(os.path.join(tmp_root, "roi2"), exist_ok=True)
-                if save_wave:
-                    os.makedirs(os.path.join(tmp_root, "wave"), exist_ok=True)
-                if save_roi1_wave:
-                    os.makedirs(os.path.join(tmp_root, "wave1"), exist_ok=True)
-                roi1_dir = os.path.join(tmp_root, "roi1")
-                roi2_dir = os.path.join(tmp_root, "roi2")
-                roi3_dir = os.path.join(tmp_root, "roi3")
-                wave_dir = os.path.join(tmp_root, "wave")
-                wave1_dir = os.path.join(tmp_root, "wave1")
-        else:
-            session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
-            tmp_root = os.path.join(self._base_dir, "tmp", session_start)
-            roi1_dir = os.path.join(tmp_root, "roi1")
-            roi2_dir = os.path.join(tmp_root, "roi2")
-            roi3_dir = os.path.join(tmp_root, "roi3")
-            wave_dir = os.path.join(tmp_root, "wave")
-            wave1_dir = os.path.join(tmp_root, "wave1")
-
-            if save_roi1 or save_roi2 or save_roi3 or save_wave:
-                os.makedirs(tmp_root, exist_ok=True)
-            if save_roi1:
-                os.makedirs(roi1_dir, exist_ok=True)
-            if save_roi2:
-                os.makedirs(roi2_dir, exist_ok=True)
-            if save_roi3:
-                os.makedirs(roi3_dir, exist_ok=True)
-            if save_wave:
-                os.makedirs(wave_dir, exist_ok=True)
-            if save_roi1_wave:
-                os.makedirs(wave1_dir, exist_ok=True)
+        artifact_dirs = prepare_artifact_dirs(
+            base_dir=self._base_dir,
+            processing_mode=processing_mode,
+            video_files=list(video_files) if video_files else None,
+            statistics_manager=self._statistics_manager,
+            create_video_folders=self._create_video_folders,
+            save_roi1=save_roi1,
+            save_roi2=save_roi2,
+            save_roi3=save_roi3,
+            save_wave=save_wave,
+            save_roi1_wave=save_roi1_wave,
+        )
+        tmp_root = artifact_dirs.tmp_root
+        roi1_dir = artifact_dirs.roi1_dir
+        roi2_dir = artifact_dirs.roi2_dir
+        roi3_dir = artifact_dirs.roi3_dir
+        wave_dir = artifact_dirs.wave_dir
+        wave1_dir = artifact_dirs.wave1_dir
 
         frame_index = 0
 
