@@ -18,6 +18,7 @@ from fem_refactor.config_extractors import (
     extract_roi1_peak_detection_config,
     extract_roi_capture_config,
 )
+from fem_refactor.initial_state_builder import build_initial_state
 from fem_refactor.intersection_manager import IntersectionManager
 from fem_refactor.logging_manager import (
     resolve_master_logging_enabled,
@@ -26,18 +27,14 @@ from fem_refactor.logging_manager import (
     setup_peak_logger,
 )
 from fem_refactor.models import (
-    Buffers,
     ConfigValues,
     DaemonContext,
     Managers,
     Paths,
-    Roi1ThresholdState,
     RuntimeState,
-    ThresholdState,
     VideoState,
 )
 from fem_refactor.processing_mode_manager import initialize_processing_mode
-from fem_refactor.signal_buffers import create_signal_buffers
 from fem_refactor.video_session_manager import VideoSessionManager
 from fem_refactor.timing_manager import compute_timing_state
 from fem_refactor.video_session_factory import maybe_create_video_session_manager
@@ -196,43 +193,12 @@ class DaemonBootstrap:
 
         logger = setup_peak_logger(enabled=master_logging_enabled)
 
-        # Track a session-wide "background mean"
-        bg_count: int = 0
-        bg_mean: float = 0.0
         last_intersection_roi: Optional[Tuple[int, int]] = None
         intersection_manager = IntersectionManager()
-        frames_since_protection_end: int = 0
-
-        # Threshold protection state management
-        threshold_protection_active: bool = False
-        protection_end_time: float = 0.0
-        consecutive_below_threshold: int = 0
-        last_waveform_time: float = 0.0
-
-        # ROI1 independent buffer and state (parallel to ROI2)
-        roi1_bg_count: int = 0
-        roi1_bg_mean: float = 0.0
-        roi1_threshold_protection_active: bool = False
-        roi1_protection_end_time: float = 0.0
-        roi1_consecutive_below_threshold: int = 0
-        roi1_last_waveform_time: float = 0.0
-
-        (
-            gray_buffer,
-            roi1_gray_buffer,
-            roi3_gray_buffer,
-            roi3_80_160_buffer,
-            roi3_g1_buffer,
-            roi3_g2_buffer,
-            roi3_column_diff_buffer,
-        ) = create_signal_buffers(maxlen=100)
-
-        # Initialize ROI1 threshold used so hybrid detection can reference it
-        roi1_threshold_used: float = max(roi1_threshold, roi1_threshold_minimum)
-
-        # ROI1波峰唯一ID管理机制 - 防止重复记录
-        processed_roi1_peaks: Dict[Tuple[int, int], str] = {}
-        roi1_peak_counter: int = 0
+        buffers_obj, thr_state, roi1_thr_state, runtime_state = build_initial_state(
+            roi1_threshold=float(roi1_threshold),
+            roi1_threshold_minimum=float(roi1_threshold_minimum),
+        )
 
         artifact_dirs = prepare_artifact_dirs(
             base_dir=self._base_dir,
@@ -371,36 +337,6 @@ class DaemonBootstrap:
             wave1_dir=str(wave1_dir),
         )
 
-        buffers_obj = Buffers(
-            gray_buffer=gray_buffer,
-            roi1_gray_buffer=roi1_gray_buffer,
-            roi3_gray_buffer=roi3_gray_buffer,
-            roi3_80_160_buffer=roi3_80_160_buffer,
-            roi3_g1_buffer=roi3_g1_buffer,
-            roi3_g2_buffer=roi3_g2_buffer,
-            roi3_column_diff_buffer=roi3_column_diff_buffer,
-        )
-
-        thr_state = ThresholdState(
-            bg_count=int(bg_count),
-            bg_mean=float(bg_mean),
-            frames_since_protection_end=int(frames_since_protection_end),
-            threshold_protection_active=bool(threshold_protection_active),
-            protection_end_time=float(protection_end_time),
-            consecutive_below_threshold=int(consecutive_below_threshold),
-            last_waveform_time=float(last_waveform_time),
-        )
-
-        roi1_thr_state = Roi1ThresholdState(
-            bg_count=int(roi1_bg_count),
-            bg_mean=float(roi1_bg_mean),
-            threshold_protection_active=bool(roi1_threshold_protection_active),
-            protection_end_time=float(roi1_protection_end_time),
-            consecutive_below_threshold=int(roi1_consecutive_below_threshold),
-            last_waveform_time=float(roi1_last_waveform_time),
-            threshold_used=float(roi1_threshold_used),
-        )
-
         managers = Managers(
             statistics_manager=self._statistics_manager,
             analysis_cache=analysis_cache,
@@ -410,12 +346,8 @@ class DaemonBootstrap:
             logger=logger,
         )
 
-        runtime_state = RuntimeState(
-            frame_index=int(frame_index),
-            last_intersection_roi=last_intersection_roi,
-            processed_roi1_peaks=processed_roi1_peaks,
-            roi1_peak_counter=int(roi1_peak_counter),
-        )
+        runtime_state.frame_index = int(frame_index)
+        runtime_state.last_intersection_roi = last_intersection_roi
 
         ctx = DaemonContext(
             cfg=cfg_values,
