@@ -40,6 +40,7 @@ from fem_refactor.processing_mode_manager import initialize_processing_mode
 from fem_refactor.signal_buffers import create_signal_buffers
 from fem_refactor.video_session_manager import VideoSessionManager
 from fem_refactor.timing_manager import compute_timing_state
+from fem_refactor.video_session_factory import maybe_create_video_session_manager
 
 
 @dataclass
@@ -427,24 +428,23 @@ class DaemonBootstrap:
             state=runtime_state,
         )
 
-        video_session_manager: Optional[VideoSessionManager] = None
-        if processing_mode == "video":
-            video_session_manager = VideoSessionManager(
-                ctx=ctx,
-                config=config,
-                statistics_manager=self._statistics_manager,
-                analysis_cache=analysis_cache,
-                create_video_folders=self._create_video_folders,
-                intersection_filter=intersection_filter,
-                roi_frame_rate=float(roi_frame_rate),
-                adaptive_window_frames=int(adaptive_window_frames),
-                save_roi1=save_roi1,
-                save_roi2=save_roi2,
-                save_roi3=save_roi3,
-                save_wave=save_wave,
-                save_roi1_wave=save_roi1_wave,
-                video_files=list(video_files) if video_files else [],
-            )
+        video_session_manager: Optional[VideoSessionManager] = maybe_create_video_session_manager(
+            processing_mode=processing_mode,
+            ctx=ctx,
+            config=config,
+            statistics_manager=self._statistics_manager,
+            analysis_cache=analysis_cache,
+            create_video_folders=self._create_video_folders,
+            intersection_filter=intersection_filter,
+            roi_frame_rate=float(roi_frame_rate),
+            adaptive_window_frames=int(adaptive_window_frames),
+            save_roi1=save_roi1,
+            save_roi2=save_roi2,
+            save_roi3=save_roi3,
+            save_wave=save_wave,
+            save_roi1_wave=save_roi1_wave,
+            video_files=list(video_files) if video_files else [],
+        )
 
         return BootstrappedDaemon(
             ctx=ctx,

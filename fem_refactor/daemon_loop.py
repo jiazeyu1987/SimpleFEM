@@ -24,7 +24,7 @@ from fem_refactor.models import DaemonContext
 from fem_refactor.shutdown_manager import shutdown_daemon
 from fem_refactor.video_session_manager import VideoSessionManager
 from fem_refactor.video_statistics_manager import statistics_manager, safe_statistics
-from fem_refactor.video_folders import create_video_folders, sanitize_video_name
+from fem_refactor.video_folders import create_video_folders
 
 
 def _get_base_dir() -> str:
@@ -38,10 +38,6 @@ def _get_base_dir() -> str:
 
 
 BASE_DIR = _get_base_dir()
-
-
-def _sanitize_video_name(video_name: str) -> str:
-    return sanitize_video_name(video_name)
 
 
 def _create_video_folders(video_path: str, session_id: str, processing_mode: str, save_roi1: bool, save_roi2: bool, save_roi3: bool, save_wave: bool, save_roi1_wave: bool = False) -> str:
