@@ -4,9 +4,27 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 
+def _compute_pre_post_averages(
+    *,
+    peak_start: int,
+    peak_end: int,
+    pre_frames: int,
+    post_frames: int,
+    roi2_curve: List[float],
+) -> Tuple[float, float]:
+    pre_start = max(0, peak_start - pre_frames)
+    pre_values = roi2_curve[pre_start:peak_start]
+    pre_avg = sum(pre_values) / len(pre_values) if pre_values else roi2_curve[peak_start] if peak_start < len(roi2_curve) else 0.0
+
+    post_end = min(len(roi2_curve), peak_end + post_frames + 1)
+    post_values = roi2_curve[peak_end + 1:post_end]
+    post_avg = sum(post_values) / len(post_values) if post_values else roi2_curve[peak_end] if peak_end < len(roi2_curve) else 0.0
+    return pre_avg, post_avg
+
+
 def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
                           config: Dict[str, Any],
-                          processed_peaks: Dict[Tuple[int, int], str] = None,
+                          processed_peaks: Dict[int, str] = None,
                           peak_counter: int = 0) -> List[Dict[str, Any]]:
     """
     混合波峰检测：ROI1检测波峰区间，ROI2在相同区间内判定颜色
@@ -15,13 +33,13 @@ def hybrid_peak_detection(roi1_curve: List[float], roi2_curve: List[float],
         roi1_curve: ROI1灰度曲线数据
         roi2_curve: ROI2灰度曲线数据（与ROI1完全同步）
         config: 混合检测配置参数
-        processed_peaks: 已处理的ROI1波峰字典 {(start, end): peak_id}
+        processed_peaks: 已处理的ROI1波峰字典 {abs_peak_max: peak_id}
         peak_counter: ROI1波峰ID计数器
 
     Returns:
         hybrid_peaks: 混合检测结果列表（包含唯一ID）
     """
-    from peak_detection import detect_peaks
+    from .external.peak_detection import detect_peaks
 
     hybrid_peaks = []
 
@@ -272,15 +290,13 @@ def determine_roi2_color_in_interval(peak_start: int, peak_end: int,
                     'column_diff_value': None,
                 }
 
-        # 计算ROI2在波峰区间前的平均值
-        pre_start = max(0, peak_start - pre_frames)
-        pre_values = roi2_curve[pre_start:peak_start]
-        pre_avg = sum(pre_values) / len(pre_values) if pre_values else roi2_curve[peak_start] if peak_start < len(roi2_curve) else 0.0
-
-        # 计算ROI2在波峰区间后的平均值
-        post_end = min(len(roi2_curve), peak_end + post_frames + 1)
-        post_values = roi2_curve[peak_end + 1:post_end]
-        post_avg = sum(post_values) / len(post_values) if post_values else roi2_curve[peak_end] if peak_end < len(roi2_curve) else 0.0
+        pre_avg, post_avg = _compute_pre_post_averages(
+            peak_start=peak_start,
+            peak_end=peak_end,
+            pre_frames=int(pre_frames),
+            post_frames=int(post_frames),
+            roi2_curve=roi2_curve,
+        )
 
         # 颜色判定：基于前后差异
         frame_difference = post_avg - pre_avg
@@ -651,7 +667,7 @@ def run_peak_detection_step(
 
     This is a pure relocation of the legacy in-loop block; decision logic must not change.
     """
-    from peak_detection import detect_peaks  # type: ignore
+    from .external.peak_detection import detect_peaks  # type: ignore
 
     detection_mode = "roi2_legacy"
     hybrid_peaks: List[Dict[str, Any]] = []

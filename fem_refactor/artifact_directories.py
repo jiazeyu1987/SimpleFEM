@@ -29,6 +29,9 @@ def prepare_artifact_dirs(
     save_wave: bool,
     save_roi1_wave: bool,
 ) -> ArtifactDirs:
+    external_root = os.path.join(base_dir, "fem_refactor", "external")
+    os.makedirs(external_root, exist_ok=True)
+
     # Prepare per-video image save directories if enabled
     if processing_mode == "video" and video_files:
         current_stats = statistics_manager.current_statistics
@@ -58,7 +61,7 @@ def prepare_artifact_dirs(
             )
 
         session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tmp_root = os.path.join(base_dir, "tmp", session_start)
+        tmp_root = os.path.join(external_root, "tmp", session_start)
         if save_roi1 or save_roi2 or save_wave:
             os.makedirs(tmp_root, exist_ok=True)
         if save_roi1:
@@ -84,7 +87,7 @@ def prepare_artifact_dirs(
         )
 
     session_start = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tmp_root = os.path.join(base_dir, "tmp", session_start)
+    tmp_root = os.path.join(external_root, "tmp", session_start)
     roi1_dir = os.path.join(tmp_root, "roi1")
     roi2_dir = os.path.join(tmp_root, "roi2")
     roi3_dir = os.path.join(tmp_root, "roi3")
@@ -112,4 +115,3 @@ def prepare_artifact_dirs(
         wave_dir=str(wave_dir),
         wave1_dir=str(wave1_dir),
     )
-

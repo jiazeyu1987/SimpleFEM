@@ -158,7 +158,7 @@ def detect_green_intersection_threshold(image: np.ndarray,
         raise ValueError("Input image is None.")
 
     # 导入原有的检测函数
-    from green_detector import _detect_green_lines, _compute_intersection
+    from .green_detector import _detect_green_lines, _compute_intersection
 
     h, w = image.shape[:2]
 

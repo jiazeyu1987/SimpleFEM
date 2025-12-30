@@ -12,6 +12,7 @@ Usage:
 """
 
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Any, Optional, Tuple
@@ -38,11 +39,12 @@ def _get_base_dir() -> str:
 
 
 BASE_DIR = _get_base_dir()
+EXTERNAL_BASE_DIR = os.path.join(BASE_DIR, "fem_refactor", "external")
 
 
 def _create_video_folders(video_path: str, session_id: str, processing_mode: str, save_roi1: bool, save_roi2: bool, save_roi3: bool, save_wave: bool, save_roi1_wave: bool = False) -> str:
     return create_video_folders(
-        base_dir=BASE_DIR,
+        base_dir=EXTERNAL_BASE_DIR,
         video_path=video_path,
         session_id=session_id,
         processing_mode=processing_mode,

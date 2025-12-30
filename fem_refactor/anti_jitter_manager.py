@@ -23,7 +23,7 @@ class AntiJitterManager:
 
                 if algorithm == "threshold":
                     # 阈值式防抖动
-                    from threshold_based_anti_jitter import ThresholdIntersectionFilter
+                    from .external.threshold_based_anti_jitter import ThresholdIntersectionFilter
 
                     intersection_filter = ThresholdIntersectionFilter(movement_threshold, initialization_frames)
                     print("ROI2阈值式防抖动已启用:")
@@ -33,7 +33,7 @@ class AntiJitterManager:
                     print(f"  - 策略: 小于{movement_threshold}px变化时ROI2完全静止，超过才更新")
                 else:
                     # EMA平滑式防抖动
-                    from green_detector import IntersectionFilter
+                    from .external.green_detector import IntersectionFilter
 
                     ema_config = anti_jitter_config.get("ema", {})
                     alpha = float(ema_config.get("alpha", 0.25))
@@ -64,7 +64,7 @@ class AntiJitterManager:
                     print(f"  - initialization_frames (初始化帧数): {initialization_frames}")
 
             except (ValueError, TypeError) as e:
-                from green_detector import IntersectionFilter
+                from .external.green_detector import IntersectionFilter
 
                 print(f"Error: 防抖动配置参数无效: {e}")
                 print("使用默认参数启用EMA防抖动")
@@ -73,4 +73,3 @@ class AntiJitterManager:
             print("ROI2防抖动已禁用")
 
         return anti_jitter_config, intersection_filter
-

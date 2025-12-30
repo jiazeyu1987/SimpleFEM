@@ -1,22 +1,10 @@
 from __future__ import annotations
 
 import os
-import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fem_refactor.paths import get_base_dir
-
-
-def _setup_import_paths() -> None:
-    base_dir = get_base_dir(__file__)
-    if base_dir not in sys.path:
-        sys.path.append(base_dir)
-
-
-_setup_import_paths()
-
-from safe_peak_statistics import SafePeakStatistics  # type: ignore  # noqa: E402
+from .external.safe_peak_statistics import SafePeakStatistics
 
 
 class VideoStatisticsManager:
@@ -79,4 +67,3 @@ statistics_manager = VideoStatisticsManager()
 
 # 为了向后兼容，保持原有的safe_statistics全局变量
 safe_statistics = statistics_manager.current_statistics
-

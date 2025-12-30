@@ -18,6 +18,7 @@ from fem_refactor.config_extractors import (
     extract_roi1_peak_detection_config,
     extract_roi_capture_config,
 )
+from fem_refactor.config_values_factory import build_config_values
 from fem_refactor.initial_state_builder import build_initial_state
 from fem_refactor.intersection_manager import IntersectionManager
 from fem_refactor.logging_manager import (
@@ -27,7 +28,6 @@ from fem_refactor.logging_manager import (
     setup_peak_logger,
 )
 from fem_refactor.models import (
-    ConfigValues,
     DaemonContext,
     Managers,
     Paths,
@@ -76,7 +76,7 @@ class DaemonBootstrap:
         set_master_logging_enabled(master_logging_enabled)
 
         # 配置日志系统（在清理之前，以便记录清理过程）
-        log_file = setup_logging(enabled=master_logging_enabled, config=config)
+        setup_logging(enabled=master_logging_enabled, config=config)
         logging.info("SimpleFEM ROI Daemon 启动...")
         print("SimpleFEM ROI Daemon 启动...")
 
@@ -161,16 +161,12 @@ class DaemonBootstrap:
         hybrid_cfg = extract_hybrid_detection_config(config)
         hybrid_conf = hybrid_cfg.hybrid_conf
         hybrid_enabled = hybrid_cfg.hybrid_enabled
-        _detection_strategy = hybrid_conf.get("detection_strategy", "roi1_peaks_roi2_color")
-        _fusion_strategy = hybrid_conf.get("fusion_strategy", "roi2_priority")
 
         # ROI2颜色判定配置
         roi2_pre_frames = hybrid_cfg.roi2_pre_frames
         roi2_post_frames = hybrid_cfg.roi2_post_frames
 
         # ROI1波峰宽度验证配置
-        peak_width_config = hybrid_conf.get("roi1_peak_width_range", [30, 40])
-        _min_peak_width = int(peak_width_config[0])
         max_peak_width = hybrid_cfg.max_peak_width
 
         # 数据质量检查配置
@@ -258,8 +254,8 @@ class DaemonBootstrap:
         except Exception:
             pass
 
-        cfg_values = ConfigValues(
-            raw=config,
+        cfg_values = build_config_values(
+            config=config,
             roi_default=roi_default,
             extension_params=extension_params,
             roi3_extension_params=roi3_extension_params,

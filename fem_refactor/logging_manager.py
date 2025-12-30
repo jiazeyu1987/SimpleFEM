@@ -18,6 +18,14 @@ _ORIG_STDERR: Optional[Any] = None
 _DEVNULL: Optional[Any] = None
 
 
+def get_external_base_dir() -> str:
+    return os.path.join(BASE_DIR, "fem_refactor", "external")
+
+
+def get_logs_dir() -> str:
+    return os.path.join(get_external_base_dir(), "logs")
+
+
 def _parse_bool_env(value: Optional[str]) -> Optional[bool]:
     if value is None:
         return None
@@ -91,8 +99,7 @@ def setup_logging(*, enabled: Optional[bool] = None, config: Optional[dict] = No
         root.handlers.clear()
         root.disabled = True
         return ""
-    base_dir = BASE_DIR
-    log_dir = os.path.join(base_dir, "logs")
+    log_dir = get_logs_dir()
     os.makedirs(log_dir, exist_ok=True)
 
     # 创建日志文件名（包含时间戳）
@@ -156,7 +163,7 @@ def setup_peak_logger(*, enabled: Optional[bool] = None) -> logging.Logger:
     logger.setLevel(logging.INFO)
 
     # Keep logs local to SimpleFEM project directory
-    log_dir = os.path.join(BASE_DIR, "logs")
+    log_dir = get_logs_dir()
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "roi_peak_daemon.log")
 

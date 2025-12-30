@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from green_detector import detect_green_intersection
+from .external.green_detector import detect_green_intersection
 
 
 class IntersectionManager:
@@ -54,4 +54,3 @@ class IntersectionManager:
             center_y = roi1_height // 2
 
         return intersection, (center_x, center_y)
-

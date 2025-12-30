@@ -24,7 +24,12 @@ def _get_base_dir() -> str:
     """获取基础目录，支持源码和打包模式"""
     if getattr(sys, "frozen", False) and hasattr(sys, "executable"):
         return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
+    try:
+        from ..paths import get_base_dir  # type: ignore
+
+        return get_base_dir(__file__)
+    except Exception:
+        return os.path.dirname(os.path.abspath(__file__))
 
 
 BASE_DIR = _get_base_dir()
