@@ -9,6 +9,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from fem_refactor.analysis_cache import RoiAnalysisCache
 from fem_refactor.anti_jitter_manager import AntiJitterManager
 from fem_refactor.artifact_directories import prepare_artifact_dirs
+from fem_refactor.cache_session_manager import start_analysis_cache_session
 from fem_refactor.cleanup_manager import cleanup_directories
 from fem_refactor.config_loader import load_fem_config
 from fem_refactor.config_extractors import (
@@ -274,30 +275,20 @@ class DaemonBootstrap:
 
         # Start cache session (one file per SafePeakStatistics session/video)
         try:
-            current_stats = self._statistics_manager.current_statistics
-            session_id = current_stats.session_id if current_stats else datetime.now().strftime("%Y%m%d_%H%M%S")
-            video_path_for_meta = None
-            if processing_mode == "video" and video_files:
-                if current_video_index < len(video_files):
-                    video_path_for_meta = video_files[current_video_index]
-                else:
-                    video_path_for_meta = video_files[0]
-            analysis_cache.start_session(
-                session_id,
+            start_analysis_cache_session(
+                analysis_cache=analysis_cache,
                 processing_mode=processing_mode,
-                video_path=video_path_for_meta,
+                video_files=list(video_files) if video_files else None,
+                current_video_index=int(current_video_index),
                 config=config,
-                extra_meta={
-                    "roi_frame_rate": roi_frame_rate,
-                    "effective_frame_rate": effective_frame_rate,
-                    "video_fps": video_fps,
-                    "video_frame_step": video_frame_step,
-                    "adaptive_window_frames": adaptive_window_frames,
-                    "gray_buffer_maxlen": 100,
-                },
+                statistics_manager=self._statistics_manager,
+                roi_frame_rate=float(roi_frame_rate),
+                effective_frame_rate=float(effective_frame_rate),
+                video_fps=float(video_fps),
+                video_frame_step=int(video_frame_step),
+                adaptive_window_frames=int(adaptive_window_frames),
+                gray_buffer_maxlen=100,
             )
-            if analysis_cache.path:
-                print(f"[cache] analysis_cache={analysis_cache.path}")
         except Exception:
             pass
 
