@@ -10,6 +10,13 @@ from fem_refactor.analysis_cache import RoiAnalysisCache
 from fem_refactor.anti_jitter_manager import AntiJitterManager
 from fem_refactor.cleanup_manager import cleanup_directories
 from fem_refactor.config_loader import load_fem_config
+from fem_refactor.config_extractors import (
+    extract_data_processing_config,
+    extract_hybrid_detection_config,
+    extract_peak_detection_config,
+    extract_roi1_peak_detection_config,
+    extract_roi_capture_config,
+)
 from fem_refactor.intersection_manager import IntersectionManager
 from fem_refactor.logging_manager import (
     resolve_master_logging_enabled,
@@ -31,7 +38,7 @@ from fem_refactor.models import (
 from fem_refactor.processing_mode_manager import initialize_processing_mode
 from fem_refactor.signal_buffers import create_signal_buffers
 from fem_refactor.video_session_manager import VideoSessionManager
-from fem_refactor.video_source import get_video_fps
+from fem_refactor.timing_manager import compute_timing_state
 
 
 @dataclass
@@ -94,96 +101,90 @@ class DaemonBootstrap:
             self._statistics_manager,
         )
 
-        roi_default = config.get("roi_capture", {}).get("default_config", {})
-        roi2_config = config.get("roi_capture", {}).get("roi2_config", {})
-        extension_params = roi2_config.get("extension_params", {})
+        roi_capture_cfg = extract_roi_capture_config(config)
+        roi_default = roi_capture_cfg.roi_default
+        extension_params = roi_capture_cfg.extension_params
+        roi3_extension_params = roi_capture_cfg.roi3_extension_params
 
-        # Load ROI3 configuration
-        roi3_config = config.get("roi_capture", {}).get("roi3_config", {})
-        roi3_extension_params = roi3_config.get("extension_params", {})
-
-        data_processing = config.get("data_processing", {})
-        save_roi1 = bool(data_processing.get("save_roi1", False))
-        save_roi2 = bool(data_processing.get("save_roi2", False))
-        save_roi3 = bool(data_processing.get("save_roi3", False))
-        save_wave = bool(data_processing.get("save_wave", False))
-        save_roi1_wave = bool(data_processing.get("save_roi1_wave", False))
+        data_processing_cfg = extract_data_processing_config(config)
+        save_roi1 = data_processing_cfg.save_roi1
+        save_roi2 = data_processing_cfg.save_roi2
+        save_roi3 = data_processing_cfg.save_roi3
+        save_wave = data_processing_cfg.save_wave
+        save_roi1_wave = data_processing_cfg.save_roi1_wave
         # only_delect == True: save ROI1/ROI2/wave only when peaks are detected
-        only_delect = bool(data_processing.get("only_delect", False))
+        only_delect = data_processing_cfg.only_delect
 
-        peak_conf = config.get("peak_detection", {})
-        threshold = float(peak_conf.get("threshold", 105.0))
-        threshold_minimum = float(peak_conf.get("threshold_minimum", 80.0))
-        margin_frames = int(peak_conf.get("margin_frames", 5))
-        diff_threshold = float(peak_conf.get("difference_threshold", 0.5))
+        peak_cfg, peak_conf = extract_peak_detection_config(config)
+        threshold = peak_cfg.threshold
+        threshold_minimum = peak_cfg.threshold_minimum
+        margin_frames = peak_cfg.margin_frames
+        diff_threshold = peak_cfg.diff_threshold
         # 新增：阈值前后"静默"帧数要求（升阈值前 X 帧和降阈值后 X 帧都不能超过阈值）
-        silence_frames = int(peak_conf.get("silence_frames", 0))
-        pre_post_avg_frames = int(peak_conf.get("pre_post_avg_frames", 5))
+        silence_frames = peak_cfg.silence_frames
+        pre_post_avg_frames = peak_cfg.pre_post_avg_frames
         # 自适应阈值参数
-        adaptive_threshold_enabled = bool(peak_conf.get("adaptive_threshold_enabled", False))
-        threshold_over_mean_ratio = float(peak_conf.get("threshold_over_mean_ratio", 0.15))
-        adaptive_window_seconds = float(peak_conf.get("adaptive_window_seconds", 3.0))
+        adaptive_threshold_enabled = peak_cfg.adaptive_threshold_enabled
+        threshold_over_mean_ratio = peak_cfg.threshold_over_mean_ratio
+        adaptive_window_seconds = peak_cfg.adaptive_window_seconds
 
         # 阈值保护参数
-        protection_conf = peak_conf.get("threshold_protection", {})
-        protection_enabled = bool(protection_conf.get("enabled", False))
-        recovery_delay_seconds = float(protection_conf.get("recovery_delay_seconds", 1.0))
-        stability_frames = int(protection_conf.get("stability_frames", 5))
-        waveform_trigger_enabled = bool(protection_conf.get("waveform_trigger_enabled", True))
+        protection_enabled = peak_cfg.protection_enabled
+        recovery_delay_seconds = peak_cfg.recovery_delay_seconds
+        stability_frames = peak_cfg.stability_frames
+        waveform_trigger_enabled = peak_cfg.waveform_trigger_enabled
 
-        min_region_length = int(peak_conf.get("min_region_length", 1))
+        min_region_length = peak_cfg.min_region_length
 
         # ROI1 configuration parameters (independent from ROI2)
-        roi1_peak_conf = config.get("roi1_peak_detection", {})
-        roi1_enabled = bool(roi1_peak_conf.get("enabled", False))
-        roi1_threshold = float(roi1_peak_conf.get("threshold", 120.0))
-        roi1_threshold_minimum = float(roi1_peak_conf.get("threshold_minimum", 110.0))
-        roi1_margin_frames = int(roi1_peak_conf.get("margin_frames", 5))
-        roi1_silence_frames = int(roi1_peak_conf.get("silence_frames", 5))
-        roi1_pre_post_avg_frames = int(roi1_peak_conf.get("pre_post_avg_frames", 5))
-        roi1_difference_threshold = float(roi1_peak_conf.get("difference_threshold", 2.0))
-        roi1_min_region_length = int(roi1_peak_conf.get("min_region_length", 5))
+        roi1_peak_cfg = extract_roi1_peak_detection_config(config)
+        roi1_enabled = roi1_peak_cfg.roi1_enabled
+        roi1_threshold = roi1_peak_cfg.roi1_threshold
+        roi1_threshold_minimum = roi1_peak_cfg.roi1_threshold_minimum
+        roi1_margin_frames = roi1_peak_cfg.roi1_margin_frames
+        roi1_silence_frames = roi1_peak_cfg.roi1_silence_frames
+        roi1_pre_post_avg_frames = roi1_peak_cfg.roi1_pre_post_avg_frames
+        roi1_difference_threshold = roi1_peak_cfg.roi1_difference_threshold
+        roi1_min_region_length = roi1_peak_cfg.roi1_min_region_length
 
         # ROI1 adaptive threshold parameters
-        roi1_adaptive_threshold_enabled = bool(roi1_peak_conf.get("adaptive_threshold_enabled", True))
-        roi1_threshold_over_mean_ratio = float(roi1_peak_conf.get("threshold_over_mean_ratio", 0.08))
-        roi1_adaptive_window_seconds = float(roi1_peak_conf.get("adaptive_window_seconds", 3.0))
+        roi1_adaptive_threshold_enabled = roi1_peak_cfg.roi1_adaptive_threshold_enabled
+        roi1_threshold_over_mean_ratio = roi1_peak_cfg.roi1_threshold_over_mean_ratio
+        roi1_adaptive_window_seconds = roi1_peak_cfg.roi1_adaptive_window_seconds
 
         # ROI1 threshold protection parameters
-        roi1_protection_conf = roi1_peak_conf.get("threshold_protection", {})
-        roi1_protection_enabled = bool(roi1_protection_conf.get("enabled", True))
-        roi1_recovery_delay_seconds = float(roi1_protection_conf.get("recovery_delay_seconds", 1.0))
-        roi1_stability_frames = int(roi1_protection_conf.get("stability_frames", 5))
-        roi1_waveform_trigger_enabled = bool(roi1_protection_conf.get("waveform_trigger_enabled", True))
+        roi1_protection_enabled = roi1_peak_cfg.roi1_protection_enabled
+        roi1_recovery_delay_seconds = roi1_peak_cfg.roi1_recovery_delay_seconds
+        roi1_stability_frames = roi1_peak_cfg.roi1_stability_frames
+        roi1_waveform_trigger_enabled = roi1_peak_cfg.roi1_waveform_trigger_enabled
 
         # 混合检测配置参数读取
-        hybrid_conf = config.get("hybrid_detection", {})
-        hybrid_enabled = bool(hybrid_conf.get("enabled", False))
+        hybrid_cfg = extract_hybrid_detection_config(config)
+        hybrid_conf = hybrid_cfg.hybrid_conf
+        hybrid_enabled = hybrid_cfg.hybrid_enabled
         _detection_strategy = hybrid_conf.get("detection_strategy", "roi1_peaks_roi2_color")
         _fusion_strategy = hybrid_conf.get("fusion_strategy", "roi2_priority")
 
         # ROI2颜色判定配置
-        roi2_color_config = hybrid_conf.get("roi2_color_frames", {})
-        roi2_pre_frames = int(roi2_color_config.get("pre_peak", 5))
-        roi2_post_frames = int(roi2_color_config.get("post_peak", 10))
+        roi2_pre_frames = hybrid_cfg.roi2_pre_frames
+        roi2_post_frames = hybrid_cfg.roi2_post_frames
 
         # ROI1波峰宽度验证配置
         peak_width_config = hybrid_conf.get("roi1_peak_width_range", [30, 40])
         _min_peak_width = int(peak_width_config[0])
-        max_peak_width = int(peak_width_config[1])
+        max_peak_width = hybrid_cfg.max_peak_width
 
         # 数据质量检查配置
-        data_quality_conf = hybrid_conf.get("data_quality", {})
-        min_roi2_frames = int(data_quality_conf.get("minimum_roi2_frames", 15))
-        roi2_min_variance = float(data_quality_conf.get("roi2_minimum_variance", 0.5))
-        fallback_enabled = bool(hybrid_conf.get("fallback_enabled", True))
+        data_quality_conf = hybrid_cfg.data_quality_conf
+        min_roi2_frames = hybrid_cfg.min_roi2_frames
+        roi2_min_variance = hybrid_cfg.roi2_min_variance
+        fallback_enabled = hybrid_cfg.fallback_enabled
 
         # G1/G2 覆盖配置（新增）
-        g1_g2_conf = peak_conf.get("g1_g2_override", {})
-        g1_g2_override_enabled = bool(g1_g2_conf.get("enabled", True))
-        g1_threshold = float(g1_g2_conf.get("g1_threshold", 98.0))
-        g2_threshold = float(g1_g2_conf.get("g2_threshold", 20.0))
-        use_peak_max_g1_g2 = bool(g1_g2_conf.get("use_peak_max", True))
+        g1_g2_override_enabled = peak_cfg.g1_g2_override_enabled
+        g1_threshold = peak_cfg.g1_threshold
+        g2_threshold = peak_cfg.g2_threshold
+        use_peak_max_g1_g2 = peak_cfg.use_peak_max_g1_g2
 
         print(
             f"[G1/G2覆盖] 配置: enabled={g1_g2_override_enabled}, "
@@ -293,41 +294,22 @@ class DaemonBootstrap:
         frame_index = 0
 
         # Use roi_capture.frame_rate as loop frequency
-        roi_frame_rate = config.get("roi_capture", {}).get("frame_rate", 1)
-        try:
-            roi_frame_rate = float(roi_frame_rate)
-        except Exception:
-            roi_frame_rate = 1.0
-        if roi_frame_rate <= 0:
-            roi_frame_rate = 1.0
+        roi_frame_rate = roi_capture_cfg.roi_frame_rate
 
-        video_fps = 0.0
-        video_frame_step = 1
-        first_video_frame = True
-        effective_frame_rate = roi_frame_rate
-        if processing_mode == "video" and video_cap is not None:
-            video_fps = get_video_fps(video_cap)
-            if video_fps > 0:
-                effective_frame_rate = min(roi_frame_rate, video_fps)
-                if effective_frame_rate > 0:
-                    video_frame_step = max(1, int(round(video_fps / effective_frame_rate)))
-
-        interval_seconds = 1.0 / max(1e-6, effective_frame_rate)
-        if processing_mode == "video" and video_fps > 0:
-            print(
-                f"[video] source_fps={video_fps:.2f} target_fps={effective_frame_rate:.2f} frame_step={video_frame_step}"
-            )
-
-        # 调试信息：打印帧率配置
-        print(f"[帧率配置] 配置帧率: {roi_frame_rate} fps")
-        print(f"[帧率配置] 计算间隔: {interval_seconds:.3f} 秒/帧")
-        print(f"[帧率配置] 预期7秒视频处理: {7 * roi_frame_rate} 帧")
-
-        adaptive_window_frames = int(adaptive_window_seconds * effective_frame_rate)
-        adaptive_window_frames = max(1, min(adaptive_window_frames, 100))
-
-        recovery_delay_frames = int(recovery_delay_seconds * effective_frame_rate)
-        recovery_delay_frames = max(1, recovery_delay_frames)
+        timing = compute_timing_state(
+            processing_mode=processing_mode,
+            video_cap=video_cap,
+            roi_frame_rate=float(roi_frame_rate),
+            adaptive_window_seconds=float(adaptive_window_seconds),
+            recovery_delay_seconds=float(recovery_delay_seconds),
+        )
+        video_fps = timing.video_fps
+        video_frame_step = timing.video_frame_step
+        first_video_frame = timing.first_video_frame
+        effective_frame_rate = timing.effective_frame_rate
+        interval_seconds = timing.interval_seconds
+        adaptive_window_frames = timing.adaptive_window_frames
+        recovery_delay_frames = timing.recovery_delay_frames
 
         # Start cache session (one file per SafePeakStatistics session/video)
         try:
