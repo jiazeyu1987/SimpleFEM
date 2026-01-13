@@ -23,11 +23,8 @@ class SimpleFEMConfigGUI:
             self.root.title("SimpleFEM 配置管理器")
             self.root.geometry("1800x1000")
 
-        # 配置文件路径
-        base_dir = Path(__file__).resolve().parent
-        preferred_config_path = base_dir / "fem_refactor" / "simple_fem_config.json"
-        legacy_config_path = base_dir / "simple_fem_config.json"
-        self.config_path = str(preferred_config_path if preferred_config_path.exists() else legacy_config_path)
+        # 配置文件路径（config_gui.py位于fem_refactor目录）
+        self.config_path = str(Path(__file__).resolve().parent / "simple_fem_config.json")
         self.config_data = {}
 
         # ROI可视化相关

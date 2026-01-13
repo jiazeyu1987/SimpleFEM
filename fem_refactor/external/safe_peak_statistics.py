@@ -85,9 +85,11 @@ class SafePeakStatistics:
 
         # 从配置文件读取参数
         try:
-            preferred_config_path = os.path.join(BASE_DIR, "fem_refactor", "simple_fem_config.json")
-            legacy_config_path = os.path.join(BASE_DIR, "simple_fem_config.json")
-            config_path = preferred_config_path if os.path.exists(preferred_config_path) else legacy_config_path
+            # 修正配置文件路径：从external目录向上两级到达fem_refactor目录
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(current_dir, "..", "simple_fem_config.json")
+            config_path = os.path.abspath(config_path)
+
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
@@ -98,7 +100,9 @@ class SafePeakStatistics:
                     self.cross_color_deduplication_enabled = dup_config.get("cross_color_deduplication_enabled", True)
 
                     color_priority_config = dup_config.get("color_priority", {})
-                    self.color_priority.update(color_priority_config)
+                    # 过滤掉注释字段，只保留颜色优先级
+                    filtered_priority = {k: v for k, v in color_priority_config.items() if not k.startswith('_')}
+                    self.color_priority.update(filtered_priority)
 
                     self._add_log(f"去重配置读取完成: 窗口={self.consecutive_frame_window}帧, 同色去重={self.consecutive_deduplication_enabled}, 跨颜色去重={self.cross_color_deduplication_enabled}")
                     self._add_log(f"颜色优先级: {self.color_priority}")
@@ -722,6 +726,12 @@ class SafePeakStatistics:
                             f"峰值{recent_max_value:.3f}, 时间差={time_diff}帧")
 
                 if time_diff <= self.consecutive_frame_window:
+                    # 如果跨颜色去重已禁用，且当前波峰与历史波峰颜色不同，跳过比较
+                    if not self.cross_color_deduplication_enabled and current_type != recent_type:
+                        logging.debug(f"[去重-第二层] 跨颜色去重已禁用，跳过不同颜色波峰比较: "
+                                    f"{current_type} vs {recent_type}")
+                        continue
+
                     logging.debug(f"[去重-第二层] 在时间窗口内({time_diff}<={self.consecutive_frame_window})，"
                                 f"检查峰值相同性: |{current_max_value:.3f} - {recent_max_value:.3f}| = "
                                 f"{abs(current_max_value - recent_max_value):.3f}")
